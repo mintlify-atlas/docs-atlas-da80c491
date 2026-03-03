@@ -1,0 +1,431 @@
+---
+title: 'Commit Instructions'
+description: 'Learn how to manually commit account state from Ephemeral Rollups using commit functions and the #[commit] macro'
+---
+
+## Overview
+
+Commit instructions write account state from Ephemeral Rollups (ER) back to the Solana base layer. This page covers manual commit operations, combined increment+commit patterns, and undelegation.
+
+## Manual Commit Operations
+
+### Using commit_accounts Function
+
+The `commit_accounts` function commits delegated account state back to the base layer without undelegating.
+
+```rust anchor-counter/programs/anchor-counter/src/lib.rs
+use ephemeral_rollups_sdk::ephem::commit_accounts;
+
+/// Manual commit the account in the ER.
+pub fn commit(ctx: Context<IncrementAndCommit>) -> Result<()> {
+    commit_accounts(
+        &ctx.accounts.payer,
+        vec![&ctx.accounts.counter.to_account_info()],
+        &ctx.accounts.magic_context,
+        &ctx.accounts.magic_program,
+    )?;
+    Ok(())
+}
+```
+
+### Using commit_and_undelegate_accounts Function
+
+The `commit_and_undelegate_accounts` function commits state and returns ownership to the original program.
+
+```rust anchor-counter/programs/anchor-counter/src/lib.rs
+use ephemeral_rollups_sdk::ephem::commit_and_undelegate_accounts;
+
+/// Undelegate the account from the delegation program
+pub fn undelegate(ctx: Context<IncrementAndCommit>) -> Result<()> {
+    commit_and_undelegate_accounts(
+        &ctx.accounts.payer,
+        vec![&ctx.accounts.counter.to_account_info()],
+        &ctx.accounts.magic_context,
+        &ctx.accounts.magic_program,
+    )?;
+    Ok(())
+}
+```
+
+## Commit Function Parameters
+
+<ParamField path="payer" type="&Signer" required>
+  The account paying for the commit transaction fees
+</ParamField>
+
+<ParamField path="accounts" type="Vec<&AccountInfo>" required>
+  Vector of account references to commit. Can include multiple accounts in a single commit.
+
+  ```rust
+  vec![&ctx.accounts.counter.to_account_info()]
+  ```
+</ParamField>
+
+<ParamField path="magic_context" type="&AccountInfo" required>
+  The MagicBlock context account containing ER state information
+</ParamField>
+
+<ParamField path="magic_program" type="&AccountInfo" required>
+  The MagicBlock program account that processes commits
+</ParamField>
+
+## The #[commit] Macro
+
+### Anchor Account Context
+
+The `#[commit]` macro automatically adds the required MagicBlock accounts to your instruction context.
+
+```rust anchor-counter/programs/anchor-counter/src/lib.rs
+use ephemeral_rollups_sdk::anchor::commit;
+
+/// Account for the increment instruction + manual commit.
+#[commit]
+#[derive(Accounts)]
+pub struct IncrementAndCommit<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(mut, seeds = [COUNTER_SEED], bump)]
+    pub counter: Account<'info, Counter>,
+}
+```
+
+### Auto-Generated Accounts
+
+The `#[commit]` macro adds these accounts to your context:
+
+<ParamField path="magic_program" type="Program">
+  The MagicBlock program account (auto-generated)
+</ParamField>
+
+<ParamField path="magic_context" type="AccountInfo">
+  The MagicBlock context account (auto-generated)
+</ParamField>
+
+## Increment and Commit Pattern
+
+### Combined Operation
+
+The increment and commit pattern performs account updates and commits them in a single transaction:
+
+```rust anchor-counter/programs/anchor-counter/src/lib.rs
+/// Increment the counter + manual commit the account in the ER.
+pub fn increment_and_commit(ctx: Context<IncrementAndCommit>) -> Result<()> {
+    let counter = &mut ctx.accounts.counter;
+    counter.count += 1;
+    msg!("PDA {} count: {}", counter.key(), counter.count);
+    
+    // Serialize the Anchor counter account before commit
+    counter.exit(&crate::ID)?;
+    
+    commit_accounts(
+        &ctx.accounts.payer,
+        vec![&ctx.accounts.counter.to_account_info()],
+        &ctx.accounts.magic_context,
+        &ctx.accounts.magic_program,
+    )?;
+    Ok(())
+}
+```
+
+<Note>
+  Call `counter.exit(&crate::ID)?` before committing to ensure Anchor account data is properly serialized.
+</Note>
+
+### Increment and Undelegate Pattern
+
+Combine increment with commit and undelegation:
+
+```rust anchor-counter/programs/anchor-counter/src/lib.rs
+/// Increment the counter + commit and undelegate.
+pub fn increment_and_undelegate(ctx: Context<IncrementAndCommit>) -> Result<()> {
+    let counter = &mut ctx.accounts.counter;
+    counter.count += 1;
+    msg!("PDA {} count: {}", counter.key(), counter.count);
+    
+    // Serialize the Anchor counter account, commit and undelegate
+    counter.exit(&crate::ID)?;
+    
+    commit_and_undelegate_accounts(
+        &ctx.accounts.payer,
+        vec![&ctx.accounts.counter.to_account_info()],
+        &ctx.accounts.magic_context,
+        &ctx.accounts.magic_program,
+    )?;
+    Ok(())
+}
+```
+
+## Native Rust Commit Pattern
+
+### Commit Implementation
+
+```rust rust-counter/src/processor.rs
+use ephemeral_rollups_sdk::ephem::commit_accounts;
+
+pub fn process_commit(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    // Get accounts
+    let account_info_iter = &mut accounts.iter();
+    let initializer = next_account_info(account_info_iter)?;
+    let counter_account = next_account_info(account_info_iter)?;
+    let magic_program = next_account_info(account_info_iter)?;
+    let magic_context = next_account_info(account_info_iter)?;
+
+    // Signer should be the same as the initializer
+    if !initializer.is_signer {
+        msg!("Initializer {} should be the signer", initializer.key);
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    commit_accounts(
+        initializer,
+        vec![counter_account],
+        magic_context,
+        magic_program,
+    )?;
+
+    Ok(())
+}
+```
+
+### Commit and Undelegate Implementation
+
+```rust rust-counter/src/processor.rs
+use ephemeral_rollups_sdk::ephem::commit_and_undelegate_accounts;
+
+pub fn process_commit_and_undelegate(
+    _program_id: &Pubkey,
+    accounts: &[AccountInfo],
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let initializer = next_account_info(account_info_iter)?;
+    let counter_account = next_account_info(account_info_iter)?;
+    let magic_program = next_account_info(account_info_iter)?;
+    let magic_context = next_account_info(account_info_iter)?;
+
+    if !initializer.is_signer {
+        msg!("Initializer {} should be the signer", initializer.key);
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    // Commit and undelegate counter_account on ER
+    commit_and_undelegate_accounts(
+        initializer,
+        vec![counter_account],
+        magic_context,
+        magic_program,
+    )?;
+
+    Ok(())
+}
+```
+
+### Native Rust Required Accounts
+
+<ParamField path="initializer" type="Signer" required>
+  The payer and signer for the commit transaction. Must be a valid signer.
+</ParamField>
+
+<ParamField path="counter_account" type="AccountInfo" required>
+  The account(s) to commit. Can be any delegated account.
+</ParamField>
+
+<ParamField path="magic_program" type="AccountInfo" required>
+  The MagicBlock program account
+</ParamField>
+
+<ParamField path="magic_context" type="AccountInfo" required>
+  The MagicBlock context account
+</ParamField>
+
+## Increment and Commit (Native Rust)
+
+### Combined Increment and Commit
+
+```rust rust-counter/src/processor.rs
+pub fn process_increment_commit(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    increase_by: u64,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let initializer = next_account_info(account_info_iter)?;
+    let counter_account = next_account_info(account_info_iter)?;
+    let magic_program = next_account_info(account_info_iter)?;
+    let magic_context = next_account_info(account_info_iter)?;
+
+    // Validate PDA
+    let (counter_pda, _bump_seed) =
+        Pubkey::find_program_address(&[b"counter", initializer.key.as_ref()], program_id);
+    if counter_pda != *counter_account.key {
+        msg!("Invalid seeds for PDA");
+        return Err(ProgramError::InvalidArgument);
+    }
+
+    // Increment counter
+    let mut counter_data = Counter::try_from_slice(&counter_account.data.borrow())?;
+    counter_data.count += increase_by;
+    counter_data.serialize(&mut &mut counter_account.data.borrow_mut()[..])?;
+    msg!("PDA {} count: {}", counter_account.key, counter_data.count);
+
+    // Verify signer
+    if !initializer.is_signer {
+        msg!("Initializer {} should be the signer", initializer.key);
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    // Commit the changes
+    commit_accounts(
+        initializer,
+        vec![counter_account],
+        magic_context,
+        magic_program,
+    )?;
+
+    Ok(())
+}
+```
+
+### Combined Increment and Undelegate
+
+```rust rust-counter/src/processor.rs
+pub fn process_increment_undelegate(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    increase_by: u64,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let initializer = next_account_info(account_info_iter)?;
+    let counter_account = next_account_info(account_info_iter)?;
+    let magic_program = next_account_info(account_info_iter)?;
+    let magic_context = next_account_info(account_info_iter)?;
+
+    // Validate PDA
+    let (counter_pda, _bump_seed) =
+        Pubkey::find_program_address(&[b"counter", initializer.key.as_ref()], program_id);
+    if counter_pda != *counter_account.key {
+        msg!("Invalid seeds for PDA");
+        return Err(ProgramError::InvalidArgument);
+    }
+
+    // Increment counter
+    let mut counter_data = Counter::try_from_slice(&counter_account.data.borrow())?;
+    counter_data.count += increase_by;
+    counter_data.serialize(&mut &mut counter_account.data.borrow_mut()[..])?;
+    msg!("PDA {} count: {}", counter_account.key, counter_data.count);
+
+    // Verify signer
+    if !initializer.is_signer {
+        msg!("Initializer {} should be the signer", initializer.key);
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    // Commit and undelegate
+    commit_and_undelegate_accounts(
+        initializer,
+        vec![counter_account],
+        magic_context,
+        magic_program,
+    )?;
+
+    Ok(())
+}
+```
+
+## Pinocchio Commit Pattern
+
+### Commit with Pinocchio
+
+```rust pinocchio-counter/src/processor.rs
+use ephemeral_rollups_pinocchio::instruction::commit_accounts;
+
+pub fn process_commit(_program_id: &Address, accounts: &[AccountView]) -> ProgramResult {
+    let [initializer, counter_account, magic_program, magic_context] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+
+    if !initializer.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    commit_accounts(
+        initializer,
+        &[*counter_account],
+        magic_context,
+        magic_program,
+    )?;
+
+    Ok(())
+}
+```
+
+### Commit and Undelegate with Pinocchio
+
+```rust pinocchio-counter/src/processor.rs
+use ephemeral_rollups_pinocchio::instruction::commit_and_undelegate_accounts;
+
+pub fn process_commit_and_undelegate(
+    _program_id: &Address,
+    accounts: &[AccountView],
+) -> ProgramResult {
+    let [initializer, counter_account, magic_program, magic_context] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+
+    if !initializer.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    commit_and_undelegate_accounts(
+        initializer,
+        &[*counter_account],
+        magic_context,
+        magic_program,
+    )?;
+
+    Ok(())
+}
+```
+
+## Best Practices
+
+1. **Always verify signers** - Ensure the payer is a valid signer before committing
+2. **Serialize Anchor accounts** - Call `exit()` on Anchor accounts before committing
+3. **Validate PDAs** - Verify PDA derivation matches expected seeds
+4. **Batch commits when possible** - Pass multiple accounts in the vector to reduce transactions
+5. **Choose commit vs undelegate wisely** - Use `commit_accounts` to keep delegation active, `commit_and_undelegate_accounts` to return control
+
+## Common Patterns
+
+### Multi-Account Commit
+
+```rust
+commit_accounts(
+    &ctx.accounts.payer,
+    vec![
+        &ctx.accounts.counter.to_account_info(),
+        &ctx.accounts.state.to_account_info(),
+        &ctx.accounts.config.to_account_info(),
+    ],
+    &ctx.accounts.magic_context,
+    &ctx.accounts.magic_program,
+)?;
+```
+
+### Conditional Commit
+
+```rust
+if counter.count > 1000 {
+    counter.exit(&crate::ID)?;
+    commit_and_undelegate_accounts(
+        &ctx.accounts.payer,
+        vec![&ctx.accounts.counter.to_account_info()],
+        &ctx.accounts.magic_context,
+        &ctx.accounts.magic_program,
+    )?;
+}
+```
+
+## Related Instructions
+
+- [Delegation Instructions](/api/delegation-instructions) - Delegate accounts to ER
+- Program Instructions - Other program-specific operations

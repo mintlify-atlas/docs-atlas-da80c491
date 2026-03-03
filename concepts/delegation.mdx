@@ -1,0 +1,395 @@
+---
+title: Account delegation
+description: Learn how to delegate Solana accounts to Ephemeral Rollups for low-latency execution
+---
+
+Account delegation is the process of temporarily transferring ownership of an account to the MagicBlock delegation program. Once delegated, the account can be used in an Ephemeral Rollup where transactions execute with minimal latency.
+
+## Overview
+
+Delegation enables accounts to be processed by Ephemeral Rollup validators while maintaining state consistency with the Solana base layer. During delegation:
+
+- The account's owner is temporarily changed to the delegation program
+- The account can be modified through the ER with low latency
+- State automatically commits back to Solana at configured intervals
+- The account can be undelegated to return full control to the original owner
+
+## Delegation with Anchor
+
+The Anchor framework provides the simplest way to add delegation support to your programs.
+
+### Setup
+
+<Steps>
+
+### Add the SDK dependency
+
+Add the ephemeral-rollups-sdk to your `Cargo.toml`:
+
+```bash
+cargo add ephemeral-rollups-sdk
+```
+
+### Import required modules
+
+Import the delegation macros and functions:
+
+```rust
+use ephemeral_rollups_sdk::anchor::{delegate, ephemeral};
+use ephemeral_rollups_sdk::cpi::DelegateConfig;
+```
+
+### Mark your program
+
+Add the `#[ephemeral]` attribute to your program module:
+
+```rust
+#[ephemeral]
+#[program]
+pub mod anchor_counter {
+    // Your program instructions
+}
+```
+
+### Create a delegate instruction
+
+Add a delegate instruction with the `#[delegate]` attribute:
+
+```rust
+pub fn delegate(ctx: Context<DelegateInput>) -> Result<()> {
+    ctx.accounts.delegate_pda(
+        &ctx.accounts.payer,
+        &[COUNTER_SEED],
+        DelegateConfig {
+            validator: ctx.remaining_accounts.first().map(|acc| acc.key()),
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+#[delegate]
+#[derive(Accounts)]
+pub struct DelegateInput<'info> {
+    pub payer: Signer<'info>,
+    /// The PDA to delegate
+    #[account(mut, del)]
+    pub pda: AccountInfo<'info>,
+}
+```
+
+</Steps>
+
+<Note>
+The `#[delegate]` macro automatically adds the required accounts for delegation (buffer, record, metadata, delegation program, etc.).
+</Note>
+
+### Complete Anchor example
+
+From the [anchor-counter](/examples/anchor-counter) example:
+
+```rust /home/daytona/workspace/source/anchor-counter/programs/anchor-counter/src/lib.rs
+use anchor_lang::prelude::*;
+use ephemeral_rollups_sdk::anchor::{delegate, ephemeral};
+use ephemeral_rollups_sdk::cpi::DelegateConfig;
+
+pub const COUNTER_SEED: &[u8] = b"counter";
+
+#[ephemeral]
+#[program]
+pub mod anchor_counter {
+    use super::*;
+
+    pub fn delegate(ctx: Context<DelegateInput>) -> Result<()> {
+        ctx.accounts.delegate_pda(
+            &ctx.accounts.payer,
+            &[COUNTER_SEED],
+            DelegateConfig {
+                // Optionally set a specific validator
+                validator: ctx.remaining_accounts.first().map(|acc| acc.key()),
+                ..Default::default()
+            },
+        )?;
+        Ok(())
+    }
+}
+
+#[delegate]
+#[derive(Accounts)]
+pub struct DelegateInput<'info> {
+    pub payer: Signer<'info>,
+    #[account(mut, del)]
+    pub pda: AccountInfo<'info>,
+}
+```
+
+## Delegation with native Rust
+
+For programs that don't use Anchor, you can delegate accounts using the native Rust SDK.
+
+### Manual delegation
+
+From the [rust-counter](/examples/rust-counter) example:
+
+```rust /home/daytona/workspace/source/rust-counter/src/processor.rs
+use ephemeral_rollups_sdk::cpi::{delegate_account, DelegateAccounts, DelegateConfig};
+
+pub fn process_delegate(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    // Get accounts
+    let account_info_iter = &mut accounts.iter();
+    let initializer = next_account_info(account_info_iter)?;
+    let system_program = next_account_info(account_info_iter)?;
+    let pda_to_delegate = next_account_info(account_info_iter)?;
+    let owner_program = next_account_info(account_info_iter)?;
+    let delegation_buffer = next_account_info(account_info_iter)?;
+    let delegation_record = next_account_info(account_info_iter)?;
+    let delegation_metadata = next_account_info(account_info_iter)?;
+    let delegation_program = next_account_info(account_info_iter)?;
+    let validator_account = account_info_iter.next();
+
+    // Optional: client-provided validator or default validator
+    let validator_pubkey: Option<Pubkey> = 
+        validator_account.map(|acc_info| acc_info.key.clone());
+
+    // Prepare counter PDA seeds
+    let seed_1 = b"counter";
+    let seed_2 = initializer.key.as_ref();
+    let pda_seeds: &[&[u8]] = &[seed_1, seed_2];
+
+    let delegate_accounts = DelegateAccounts {
+        payer: initializer,
+        pda: pda_to_delegate,
+        owner_program,
+        buffer: delegation_buffer,
+        delegation_record,
+        delegation_metadata,
+        delegation_program,
+        system_program,
+    };
+
+    let delegate_config = DelegateConfig {
+        validator: validator_pubkey,
+        ..Default::default()
+    };
+
+    delegate_account(delegate_accounts, pda_seeds, delegate_config)?;
+
+    Ok(())
+}
+```
+
+## Delegation with Bolt
+
+The [Bolt framework](https://docs.magicblock.gg/BOLT/Introduction/introduction) provides ECS-style delegation using component attributes.
+
+### Component delegation
+
+From the [bolt-counter](/examples/bolt-counter) example:
+
+```rust /home/daytona/workspace/source/bolt-counter/programs-ecs/components/counter/src/lib.rs
+use bolt_lang::*;
+
+#[component(delegate)]
+#[derive(Default)]
+pub struct Counter {
+    pub count: u64,
+}
+```
+
+The `#[component(delegate)]` attribute automatically makes the component delegatable.
+
+### Client-side delegation
+
+```typescript
+import { createDelegateInstruction, FindComponentPda } from "@magicblock-labs/bolt-sdk";
+
+const counterPda = FindComponentPda({
+  componentId: counterComponent.programId,
+  entity: entityPda,
+});
+
+const delegateIx = createDelegateInstruction({
+  entity: entityPda,
+  account: counterPda,
+  ownerProgram: counterComponent.programId,
+  payer: provider.wallet.publicKey,
+});
+
+const tx = new anchor.web3.Transaction().add(delegateIx);
+const txSign = await provider.sendAndConfirm(tx);
+```
+
+## Delegation configuration
+
+The `DelegateConfig` struct allows you to customize delegation behavior:
+
+```rust
+pub struct DelegateConfig {
+    /// How often to commit state to base layer (in milliseconds)
+    pub commit_frequency_ms: u32,
+    /// Optional specific ER validator to delegate to
+    pub validator: Option<Pubkey>,
+}
+```
+
+### Commit frequency
+
+The `commit_frequency_ms` parameter controls how often the ER automatically commits state back to Solana:
+
+```rust
+let delegate_config = DelegateConfig {
+    commit_frequency_ms: 30_000, // Commit every 30 seconds
+    validator: None,
+};
+```
+
+<Warning>
+Setting a very low commit frequency increases base layer transaction costs. Balance latency needs with cost considerations.
+</Warning>
+
+### Validator selection
+
+You can optionally specify which ER validator should handle the delegation:
+
+```rust
+// Anchor example
+pub fn delegate(ctx: Context<DelegateInput>) -> Result<()> {
+    ctx.accounts.delegate_pda(
+        &ctx.accounts.payer,
+        &[COUNTER_SEED],
+        DelegateConfig {
+            // Use validator from remaining accounts if provided
+            validator: ctx.remaining_accounts.first().map(|acc| acc.key()),
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+```
+
+For local development, you typically need to specify the local validator identity:
+
+```typescript
+const remainingAccounts = connectionER.rpcEndpoint.includes("localhost")
+  ? [
+      {
+        pubkey: new PublicKey("mAGicPQYBMvcYveUZA5F5UNNwyHvfYh5xkLS2Fr1mev"),
+        isSigner: false,
+        isWritable: false,
+      },
+    ]
+  : [];
+
+let tx = await program.methods
+  .delegate()
+  .accounts({ payer: wallet.publicKey, pda: counterPDA })
+  .remainingAccounts(remainingAccounts)
+  .transaction();
+```
+
+## PDA delegation
+
+Delegation works seamlessly with Program Derived Addresses (PDAs). You must provide the seeds used to derive the PDA:
+
+```rust
+// Single seed
+const COUNTER_SEED: &[u8] = b"counter";
+ctx.accounts.delegate_pda(&ctx.accounts.payer, &[COUNTER_SEED], config)?;
+
+// Multiple seeds
+let seed_1 = b"counter";
+let seed_2 = initializer.key.as_ref();
+let pda_seeds: &[&[u8]] = &[seed_1, seed_2];
+delegate_account(accounts, pda_seeds, config)?;
+```
+
+<Info>
+The SDK uses these seeds to verify PDA ownership and recreate the account after undelegation.
+</Info>
+
+## Undelegating accounts
+
+To return an account to the base layer and restore original ownership:
+
+<Tabs>
+  <Tab title="Anchor/TypeScript">
+    ```typescript
+    import { createUndelegateInstruction } from "@magicblock-labs/bolt-sdk";
+
+    const undelegateIx = createUndelegateInstruction({
+      payer: provider.wallet.publicKey,
+      delegatedAccount: pda,
+      ownerProgram: program.programId,
+      reimbursement: provider.wallet.publicKey,
+    });
+
+    let tx = new anchor.web3.Transaction().add(undelegateIx);
+    await provider.sendAndConfirm(tx);
+    ```
+  </Tab>
+  <Tab title="Native Rust">
+    ```rust
+    use ephemeral_rollups_sdk::cpi::undelegate_account;
+
+    pub fn process_undelegate(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+        pda_seeds: Vec<Vec<u8>>,
+    ) -> ProgramResult {
+        let account_info_iter = &mut accounts.iter();
+        let delegated_pda = next_account_info(account_info_iter)?;
+        let delegation_buffer = next_account_info(account_info_iter)?;
+        let initializer = next_account_info(account_info_iter)?;
+        let system_program = next_account_info(account_info_iter)?;
+
+        undelegate_account(
+            delegated_pda,
+            program_id,
+            delegation_buffer,
+            initializer,
+            system_program,
+            pda_seeds,
+        )?;
+
+        Ok(())
+    }
+    ```
+  </Tab>
+  <Tab title="Anchor Program">
+    ```rust
+    use ephemeral_rollups_sdk::ephem::commit_and_undelegate_accounts;
+
+    pub fn undelegate(ctx: Context<IncrementAndCommit>) -> Result<()> {
+        commit_and_undelegate_accounts(
+            &ctx.accounts.payer,
+            vec![&ctx.accounts.counter.to_account_info()],
+            &ctx.accounts.magic_context,
+            &ctx.accounts.magic_program,
+        )?;
+        Ok(())
+    }
+    ```
+  </Tab>
+</Tabs>
+
+<Tip>
+Undelegation automatically commits the latest state to the base layer before returning ownership.
+</Tip>
+
+## Examples using delegation
+
+- [Anchor Counter](/examples/anchor-counter) - Anchor-based delegation with automatic macros
+- [Rust Counter](/examples/rust-counter) - Native Rust delegation implementation
+- [Bolt Counter](/examples/bolt-counter) - Component-based delegation with Bolt
+- [Pinocchio Counter](/examples/pinocchio-counter) - Lightweight delegation without Borsh
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Transaction execution" icon="bolt" href="/concepts/transactions">
+    Learn how to execute transactions in Ephemeral Rollups
+  </Card>
+  <Card title="Ephemeral Rollups" icon="layer-group" href="/concepts/ephemeral-rollups">
+    Understand the full ER architecture
+  </Card>
+</CardGroup>

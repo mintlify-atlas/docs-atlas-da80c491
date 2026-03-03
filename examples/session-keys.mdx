@@ -1,0 +1,340 @@
+---
+title: "Session Keys"
+description: "Enable gasless transactions with temporary session keys in Ephemeral Rollups"
+---
+
+# Session Keys
+
+Session Keys enable gasless transactions by allowing users to create temporary keypairs with limited permissions. This advanced pattern is essential for providing smooth, wallet-free experiences in games and applications built on Ephemeral Rollups.
+
+## What Are Session Keys?
+
+Session Keys are temporary keypairs that users can create and grant limited permissions to interact with their accounts. They enable:
+
+- **Gasless transactions**: Users don't need to approve every transaction
+- **Improved UX**: No wallet popups during gameplay
+- **Time-limited access**: Sessions expire automatically
+- **Scoped permissions**: Sessions can only access specific accounts/programs
+
+<Info>
+Session Keys are particularly powerful in Ephemeral Rollups because they enable continuous, low-latency interactions without wallet approval friction.
+</Info>
+
+## How It Works
+
+<Steps>
+
+### Install Session Keys SDK
+
+Add the session keys package to your program:
+
+```toml Cargo.toml
+[dependencies]
+session-keys = "0.1.0"
+ephemeral-rollups-sdk = "0.1.0"
+```
+
+And to your TypeScript client:
+
+```bash
+yarn add @magicblock-labs/gum-sdk
+```
+
+### Protect Instructions with `#[session_auth_or]`
+
+Use the `#[session_auth_or]` macro to allow both direct authority and session key access:
+
+```rust programs/anchor-counter-session/src/lib.rs
+use session_keys::{session_auth_or, Session, SessionError, SessionToken};
+
+#[session_auth_or(
+    ctx.accounts.counter.authority.key() == ctx.accounts.payer.key(),
+    SessionError::InvalidToken
+)]
+pub fn increment(ctx: Context<Increment>) -> Result<()> {
+    let counter = &mut ctx.accounts.counter;
+    counter.count += 1;
+    if counter.count > 1000 {
+        counter.count = 0;
+    }
+    msg!("PDA {} count: {}", counter.key(), counter.count);
+    Ok()
+}
+```
+
+This function can be called by:
+1. The account authority (direct access)
+2. A valid session key (temporary access)
+
+### Add Session Token to Account Context
+
+Derive the `Session` trait for your account contexts:
+
+```rust programs/anchor-counter-session/src/lib.rs
+#[derive(Accounts, Session)]
+pub struct Increment<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(
+        mut, 
+        seeds = [ COUNTER_SEED, counter.authority.key().as_ref() ], 
+        bump
+    )]
+    pub counter: Account<'info, Counter>,
+    #[session(
+        signer = payer,
+        authority = counter.authority.key() 
+    )]
+    pub session_token: Option<Account<'info, SessionToken>>,
+}
+```
+
+### Create a Session from TypeScript
+
+Users create session tokens before gameplay:
+
+```typescript tests/anchor-counter-session.ts
+import { SessionTokenManager } from "@magicblock-labs/gum-sdk";
+
+// Initialize the session manager
+const sessionKeypair = Keypair.generate(); // In practice, store this securely
+const sessionTokenManager = new SessionTokenManager(
+  provider.wallet, 
+  provider.connection
+);
+
+// Create the session token
+const topUp = true;
+const validUntilBN = new anchor.BN(Math.floor(Date.now() / 1000) + 3600); // valid for 1 hour
+const topUpLamportsBN = new anchor.BN(0.0005 * LAMPORTS_PER_SOL);
+
+const tx = await sessionTokenManager.program.methods.createSession(
+  topUp, 
+  validUntilBN, 
+  topUpLamportsBN
+)
+.accounts({
+  targetProgram: program.programId,
+  sessionSigner: sessionKeypair.publicKey,
+  authority: provider.wallet.publicKey,
+})
+.transaction();
+
+const txHash = await sendAndConfirmTransaction(
+  provider.connection, 
+  tx, 
+  [sessionKeypair, provider.wallet.payer]
+);
+```
+
+### Use the Session Key
+
+Once created, the session key can sign transactions without the main wallet:
+
+```typescript tests/anchor-counter-session.ts
+// Increment using the session key (no main wallet needed!)
+let tx = await program.methods
+  .increment()
+  .accounts({
+    counter: counterPDA,
+    sessionToken: sessionTokenPDA,
+    payer: sessionKeypair.publicKey, // Session key signs instead of main wallet
+  })
+  .transaction();
+
+// Only the session keypair signs - no wallet popup
+const txHash = await sendAndConfirmTransaction(
+  providerEphemeralRollup.connection, 
+  tx, 
+  [sessionKeypair]
+);
+```
+
+### Delegate with Session Keys
+
+Session keys can also delegate accounts to ERs:
+
+```rust programs/anchor-counter-session/src/lib.rs
+#[session_auth_or(
+    ctx.accounts.pda.authority.key() == ctx.accounts.payer.key(),
+    SessionError::InvalidToken
+)]
+pub fn delegate(ctx: Context<DelegateInput>) -> Result<()> {
+    ctx.accounts.delegate_pda(
+        &ctx.accounts.payer,
+        &[COUNTER_SEED, ctx.accounts.pda.authority.key().as_ref()],
+        DelegateConfig {
+            validator: ctx.remaining_accounts.first().map(|acc| acc.key()),
+            ..Default::default()
+        },
+    )?;
+    Ok()
+}
+
+#[delegate]
+#[derive(Accounts, Session)]
+pub struct DelegateInput<'info> {
+    pub payer: Signer<'info>,
+    #[account(mut, del)]
+    pub pda: Account<'info, Counter>,
+    #[session(
+        signer = payer,
+        authority = pda.authority.key() 
+    )]
+    pub session_token: Option<Account<'info, SessionToken>>,
+}
+```
+
+### Revoke the Session
+
+Sessions can be revoked at any time:
+
+```typescript tests/anchor-counter-session.ts
+const tx = await sessionTokenManager.program.methods
+  .revokeSession()
+  .accounts({
+    sessionToken: sessionTokenPDA,
+  })
+  .transaction();
+
+const txHash = await sendAndConfirmTransaction(
+  provider.connection, 
+  tx, 
+  [sessionKeypair]
+);
+```
+
+</Steps>
+
+## Counter Account with Authority
+
+Notice the counter includes an `authority` field:
+
+```rust programs/anchor-counter-session/src/lib.rs
+#[account]
+pub struct Counter {
+    pub authority: Pubkey,
+    pub count: u64,
+}
+
+pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+    let counter = &mut ctx.accounts.counter;
+    counter.count = 0;
+    counter.authority = *ctx.accounts.user.key;
+    msg!("PDA {} count: {}", counter.key(), counter.count);
+    Ok()
+}
+```
+
+This authority is checked by the `#[session_auth_or]` macro to validate session tokens.
+
+## Session Token PDA
+
+The session token PDA is derived from:
+
+```typescript tests/anchor-counter-session.ts
+const SESSION_TOKEN_SEED = "session_token";
+const sessionTokenPDA = web3.PublicKey.findProgramAddressSync([
+  Buffer.from(SESSION_TOKEN_SEED),
+  program.programId.toBytes(),
+  sessionKeypair.publicKey.toBytes(),
+  provider.wallet.publicKey.toBytes(),
+], sessionTokenManager.program.programId)[0];
+```
+
+## What Makes This Advanced?
+
+Session Keys demonstrate advanced patterns:
+
+1. **Dual Authorization**: Support both direct authority and delegated session access
+2. **Time-Limited Security**: Sessions expire automatically for safety
+3. **Funded Sessions**: Can pre-fund sessions to cover gas costs
+4. **Macro-Based Validation**: Use `#[session_auth_or]` for clean, declarative auth logic
+5. **ER Integration**: Works seamlessly with delegation and commitment flows
+
+## Complete Flow Example
+
+<CodeGroup>
+
+```typescript On Base Layer
+// 1. Create session
+await createSession(validFor1Hour, fundWithSOL);
+
+// 2. Initialize counter (with main wallet)
+await program.methods.initialize().accounts({...}).rpc();
+
+// 3. Delegate to ER using session key
+await program.methods.delegate()
+  .accounts({ payer: sessionKeypair.publicKey, ... })
+  .signers([sessionKeypair])
+  .rpc();
+```
+
+```typescript On Ephemeral Rollup
+// 4. Increment using session key (no wallet!)
+await program.methods.increment()
+  .accounts({ 
+    payer: sessionKeypair.publicKey,
+    sessionToken: sessionTokenPDA,
+    ...
+  })
+  .signers([sessionKeypair])
+  .rpc();
+
+// 5. Commit changes using session key
+await program.methods.commit()
+  .accounts({ 
+    payer: sessionKeypair.publicKey,
+    sessionToken: sessionTokenPDA,
+    ...
+  })
+  .signers([sessionKeypair])
+  .rpc();
+```
+
+```typescript Cleanup
+// 6. Revoke session when done
+await sessionTokenManager.program.methods
+  .revokeSession()
+  .accounts({ sessionToken: sessionTokenPDA })
+  .signers([sessionKeypair])
+  .rpc();
+```
+
+</CodeGroup>
+
+## Security Considerations
+
+<Warning>
+**Important Security Practices:**
+
+- Always set expiration times on session tokens
+- Store session keypairs securely in the browser (e.g., encrypted localStorage)
+- Limit session scope to specific programs/accounts
+- Revoke sessions when the user logs out
+- Monitor session token balances to prevent fund depletion
+</Warning>
+
+## Use Cases
+
+Session Keys are essential for:
+
+- **Gaming**: Players can make rapid moves without wallet approvals
+- **Social Apps**: Continuous interactions without friction
+- **Trading Bots**: Automated trading with limited permissions
+- **Mobile Apps**: Better UX without constant wallet popups
+
+## Benefits in Ephemeral Rollups
+
+Combining Session Keys with ERs provides:
+
+- **Ultra-low latency + No wallet popups** = Best possible UX
+- **Gasless ER transactions** funded by the session
+- **Automatic state commitment** using the session key
+- **Secure time-limited access** to delegated accounts
+
+## Next Steps
+
+- Explore [Magic Actions](/examples/magic-actions) to trigger base layer handlers on commit
+- Learn about [Cranks](/examples/crank-counter) for automated execution
+- Check the [full source code](https://github.com/magicblock-labs/ephemeral-rollups-examples/tree/main/session-keys)

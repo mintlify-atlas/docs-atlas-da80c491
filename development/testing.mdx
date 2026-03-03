@@ -1,0 +1,496 @@
+---
+title: 'Testing Guide'
+description: 'Testing patterns and best practices for MagicBlock Ephemeral Rollups'
+---
+
+## Overview
+
+Testing programs with Ephemeral Rollups requires connecting to both the base layer (Solana) and the Ephemeral Rollup. This guide covers test patterns, environment detection, and running tests across different networks.
+
+## Test Architecture
+
+### Dual Provider Pattern
+
+All examples use a dual provider pattern to interact with both layers:
+
+```typescript
+import * as anchor from "@coral-xyz/anchor";
+
+// Base Layer Provider (Solana)
+const provider = anchor.AnchorProvider.env();
+anchor.setProvider(provider);
+
+// Ephemeral Rollup Provider
+const providerEphemeralRollup = new anchor.AnchorProvider(
+  new anchor.web3.Connection(
+    process.env.EPHEMERAL_PROVIDER_ENDPOINT || "https://devnet-as.magicblock.app/",
+    {
+      wsEndpoint: process.env.EPHEMERAL_WS_ENDPOINT || "wss://devnet-as.magicblock.app/",
+    }
+  ),
+  anchor.Wallet.local()
+);
+```
+
+<Info>
+The base layer provider handles initialization, delegation, and undelegation. The Ephemeral Rollup provider handles high-speed transactions.
+</Info>
+
+## Test Workflow
+
+A typical test suite follows this pattern:
+
+<Steps>
+
+<Step title="Initialize on Base Layer">
+
+Create and initialize accounts on Solana:
+
+```typescript
+it("Initialize counter on Solana", async () => {
+  const start = Date.now();
+  let tx = await program.methods
+    .initialize()
+    .accounts({
+      user: provider.wallet.publicKey,
+    })
+    .transaction();
+
+  const txHash = await provider.sendAndConfirm(tx, [provider.wallet.payer], {
+    skipPreflight: true,
+    commitment: "confirmed",
+  });
+  const duration = Date.now() - start;
+  console.log(`${duration}ms (Base Layer) Initialize txHash: ${txHash}`);
+});
+```
+
+</Step>
+
+<Step title="Delegate to Ephemeral Rollup">
+
+Delegate accounts to the Ephemeral Rollup:
+
+```typescript
+it("Delegate counter to ER", async () => {
+  const start = Date.now();
+  
+  // Add local validator identity for localnet
+  const remainingAccounts =
+    providerEphemeralRollup.connection.rpcEndpoint.includes("localhost") ||
+    providerEphemeralRollup.connection.rpcEndpoint.includes("127.0.0.1")
+      ? [
+          {
+            pubkey: new web3.PublicKey("mAGicPQYBMvcYveUZA5F5UNNwyHvfYh5xkLS2Fr1mev"),
+            isSigner: false,
+            isWritable: false,
+          },
+        ]
+      : [];
+      
+  let tx = await program.methods
+    .delegate()
+    .accounts({
+      payer: provider.wallet.publicKey,
+      pda: counterPDA,
+    })
+    .remainingAccounts(remainingAccounts)
+    .transaction();
+    
+  const txHash = await provider.sendAndConfirm(tx, [provider.wallet.payer], {
+    skipPreflight: true,
+    commitment: "confirmed",
+  });
+  
+  const duration = Date.now() - start;
+  console.log(`${duration}ms (Base Layer) Delegate txHash: ${txHash}`);
+  
+  // Wait for delegation to propagate
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+});
+```
+
+<Note>
+Always wait 2-3 seconds after delegation for the account to be available in the Ephemeral Rollup.
+</Note>
+
+</Step>
+
+<Step title="Execute on Ephemeral Rollup">
+
+Run high-speed transactions on the Ephemeral Rollup:
+
+```typescript
+it("Increase counter on ER", async () => {
+  const start = Date.now();
+  let tx = await program.methods
+    .increment()
+    .accounts({
+      counter: counterPDA,
+    })
+    .transaction();
+    
+  tx.feePayer = providerEphemeralRollup.wallet.publicKey;
+  tx.recentBlockhash = (
+    await providerEphemeralRollup.connection.getLatestBlockhash()
+  ).blockhash;
+  tx = await providerEphemeralRollup.wallet.signTransaction(tx);
+  
+  const txHash = await providerEphemeralRollup.sendAndConfirm(tx);
+  const duration = Date.now() - start;
+  console.log(`${duration}ms (ER) Increment txHash: ${txHash}`);
+});
+```
+
+</Step>
+
+<Step title="Commit State">
+
+Commit Ephemeral Rollup state back to Solana:
+
+```typescript
+import { GetCommitmentSignature } from "@magicblock-labs/ephemeral-rollups-sdk";
+
+it("Commit counter state on ER to Solana", async () => {
+  const start = Date.now();
+  let tx = await program.methods
+    .commit()
+    .accounts({
+      payer: providerEphemeralRollup.wallet.publicKey,
+    })
+    .transaction();
+    
+  tx.feePayer = providerEphemeralRollup.wallet.publicKey;
+  tx.recentBlockhash = (
+    await providerEphemeralRollup.connection.getLatestBlockhash()
+  ).blockhash;
+  tx = await providerEphemeralRollup.wallet.signTransaction(tx);
+
+  const txHash = await providerEphemeralRollup.sendAndConfirm(tx, [], {
+    skipPreflight: true,
+  });
+  const duration = Date.now() - start;
+  console.log(`${duration}ms (ER) Commit txHash: ${txHash}`);
+
+  // Get the commitment signature on the base layer
+  const comfirmCommitStart = Date.now();
+  const txCommitSgn = await GetCommitmentSignature(
+    txHash,
+    providerEphemeralRollup.connection
+  );
+  const commitDuration = Date.now() - comfirmCommitStart;
+  console.log(`${commitDuration}ms (Base Layer) Commit txHash: ${txCommitSgn}`);
+});
+```
+
+</Step>
+
+<Step title="Undelegate">
+
+Return accounts to Solana:
+
+```typescript
+import { createUndelegateInstruction } from "@magicblock-labs/ephemeral-rollups-sdk";
+
+it("Increment and undelegate counter on ER to Solana", async () => {
+  const start = Date.now();
+  let tx = await program.methods
+    .incrementAndUndelegate()
+    .accounts({
+      payer: providerEphemeralRollup.wallet.publicKey,
+    })
+    .transaction();
+    
+  tx.feePayer = provider.wallet.publicKey;
+  tx.recentBlockhash = (
+    await providerEphemeralRollup.connection.getLatestBlockhash()
+  ).blockhash;
+  tx = await providerEphemeralRollup.wallet.signTransaction(tx);
+
+  const txHash = await providerEphemeralRollup.sendAndConfirm(tx);
+  const duration = Date.now() - start;
+  console.log(`${duration}ms (ER) Increment and Undelegate txHash: ${txHash}`);
+});
+```
+
+</Step>
+
+</Steps>
+
+## Environment Detection
+
+The `fullstack-test.sh` script automatically detects the cluster from `Anchor.toml`:
+
+```bash
+CLUSTER=$(grep -A 1 "^\[provider\]" "$ANCHOR_TOML" | grep "cluster" | sed 's/.*cluster = "\(.*\)".*/\1/' | tr -d ' ')
+```
+
+<Tabs>
+
+<Tab title="Localnet">
+
+For `cluster = "localnet"`, the script:
+
+1. Starts `mb-test-validator` on port 8899
+2. Starts `ephemeral-validator` on port 7799
+3. Airdrops SOL to the upgrade authority
+4. Builds and deploys programs
+5. Runs tests with:
+
+```bash
+EPHEMERAL_PROVIDER_ENDPOINT=http://localhost:7799 \
+EPHEMERAL_WS_ENDPOINT=ws://localhost:7800 \
+PROVIDER_ENDPOINT=http://localhost:8899 \
+WS_ENDPOINT=http://localhost:8900 \
+anchor test --skip-build --skip-deploy --skip-local-validator
+```
+
+</Tab>
+
+<Tab title="Devnet">
+
+For `cluster = "devnet"`, the script:
+
+1. Sets `ANCHOR_PROVIDER_URL=https://api.devnet.solana.com`
+2. Uses remote Ephemeral Rollup endpoints
+3. Runs tests directly:
+
+```bash
+yarn run ts-mocha --colors -p ./tsconfig.json -t 1000000 tests/**/*.ts
+```
+
+</Tab>
+
+</Tabs>
+
+## Running Tests
+
+### Basic Commands
+
+<CodeGroup>
+
+```bash Full Test (Auto-detect cluster)
+anchor test
+```
+
+```bash Skip Deployment
+anchor test --skip-deploy --skip-build --skip-local-validator
+```
+
+```bash Specific Test File
+anchor test tests/anchor-counter.ts
+```
+
+```bash With Environment Variables
+EPHEMERAL_PROVIDER_ENDPOINT=http://localhost:7799 \
+EPHEMERAL_WS_ENDPOINT=ws://localhost:7800 \
+anchor test --skip-local-validator
+```
+
+</CodeGroup>
+
+### Using fullstack-test.sh
+
+The fullstack test script provides automated testing with progress indicators:
+
+```bash
+./fullstack-test.sh
+```
+
+Features:
+- Auto-detects cluster from `Anchor.toml`
+- Starts validators automatically for localnet
+- Shows progress with spinners and timings
+- Runs multiple examples in sequence
+- Cleans up validators on completion
+
+<Warning>
+The script will kill existing validators on ports 8899 and 7799 if running when cluster is localnet.
+</Warning>
+
+### Test-Locally Script
+
+For project-specific testing:
+
+```bash
+./test-locally.sh
+```
+
+This script:
+- Checks for `ephemeral-validator` installation
+- Handles the `--skip-local-validator` flag
+- Manages validator lifecycle
+- Airdrops SOL for testing
+- Builds, deploys, and tests programs
+
+## Test Configuration
+
+### Package.json Scripts
+
+```json package.json
+{
+  "scripts": {
+    "test": "../fullstack-test.sh",
+    "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
+    "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "0.32.1",
+    "@magicblock-labs/ephemeral-rollups-sdk": "0.6.5"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "chai": "^5.2.0",
+    "mocha": "^11.2.2",
+    "ts-mocha": "^11.1.0",
+    "typescript": "^5.8.3"
+  }
+}
+```
+
+### TypeScript Configuration
+
+Tests use `ts-mocha` with extended timeouts:
+
+```bash
+yarn ts-mocha --colors -p ./tsconfig.json -t 1000000 --exit tests/**/*.ts
+```
+
+## Testing Different Networks
+
+### Localnet Testing
+
+1. Set cluster in `Anchor.toml`:
+
+```toml
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+```
+
+2. Run tests:
+
+```bash
+anchor test
+```
+
+### Devnet Testing
+
+1. Set cluster in `Anchor.toml`:
+
+```toml
+[provider]
+cluster = "devnet"
+wallet = "~/.config/solana/id.json"
+```
+
+2. Use devnet Ephemeral Rollup:
+
+```bash
+EPHEMERAL_PROVIDER_ENDPOINT=https://devnet-as.magicblock.app/ \
+EPHEMERAL_WS_ENDPOINT=wss://devnet-as.magicblock.app/ \
+anchor test
+```
+
+### Local ER with Devnet
+
+Test against devnet but use a local Ephemeral Rollup:
+
+```bash
+# Start local ER pointing to devnet
+ACCOUNTS_REMOTE=https://rpc.magicblock.app/devnet \
+ACCOUNTS_LIFECYCLE=ephemeral \
+ephemeral-validator
+
+# Run tests
+PROVIDER_ENDPOINT=http://localhost:8899 \
+WS_ENDPOINT=ws://localhost:8900 \
+anchor test --skip-build --skip-deploy --skip-local-validator
+```
+
+## Test Utilities
+
+### Checking Balances
+
+```typescript
+before(async function () {
+  const balance = await provider.connection.getBalance(
+    anchor.Wallet.local().publicKey
+  );
+  console.log("Current balance is", balance / LAMPORTS_PER_SOL, " SOL");
+});
+```
+
+### Timing Transactions
+
+```typescript
+const start = Date.now();
+// ... transaction code
+const duration = Date.now() - start;
+console.log(`${duration}ms (ER) Transaction completed`);
+```
+
+### Environment Detection in Tests
+
+```typescript
+const isLocalnet = 
+  providerEphemeralRollup.connection.rpcEndpoint.includes("localhost") ||
+  providerEphemeralRollup.connection.rpcEndpoint.includes("127.0.0.1");
+
+const remainingAccounts = isLocalnet
+  ? [{
+      pubkey: new web3.PublicKey("mAGicPQYBMvcYveUZA5F5UNNwyHvfYh5xkLS2Fr1mev"),
+      isSigner: false,
+      isWritable: false,
+    }]
+  : [];
+```
+
+## Best Practices
+
+<Tip>
+**Always wait after delegation**: Wait 2-3 seconds after delegating accounts before executing transactions on the Ephemeral Rollup.
+</Tip>
+
+<Tip>
+**Use skipPreflight for commits**: When committing state, use `skipPreflight: true` to avoid simulation failures.
+</Tip>
+
+<Tip>
+**Set proper timeouts**: Use extended timeouts (`-t 1000000`) for mocha tests to accommodate network delays.
+</Tip>
+
+<Tip>
+**Track both layers**: Always log transaction signatures and timings for both base layer and Ephemeral Rollup operations.
+</Tip>
+
+## Debugging Tests
+
+### Enable Verbose Logging
+
+```bash
+RUST_LOG=debug anchor test
+```
+
+### Check RPC Endpoints
+
+```typescript
+console.log("Base Layer Connection:", provider.connection.rpcEndpoint);
+console.log("Ephemeral Rollup Connection:", providerEphemeralRollup.connection.rpcEndpoint);
+console.log("Wallet Public Key:", anchor.Wallet.local().publicKey.toString());
+```
+
+### View Transaction Details
+
+```typescript
+const tx = await provider.connection.getTransaction(txHash, {
+  commitment: "confirmed",
+});
+console.log("Transaction:", JSON.stringify(tx, null, 2));
+```
+
+## Next Steps
+
+- Learn about [Troubleshooting Common Issues](/development/troubleshooting)
+- Explore [Example Programs](/examples/anchor-counter)
+- Read the [TypeScript SDK Reference](/api/typescript-sdk) or [Rust SDK Reference](/api/rust-sdk)

@@ -1,80 +1,300 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Run your first Ephemeral Rollup example in minutes with the Anchor Counter program
 ---
 
-## Get started in three steps
+# Quickstart
 
-Get your documentation site running locally and make your first customization.
+Get started with Ephemeral Rollups by running the Anchor Counter example. This guide will have you delegating accounts, executing low-latency transactions, and committing state back to Solana in under 10 minutes.
 
-### Step 1: Set up your local environment
+## Prerequisites
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+Before you begin, ensure you have the following tools installed:
 
-### Step 2: Deploy your changes
+| Software   | Version | Installation Guide |
+| ---------- | ------- | --------------------------------------------------------------- |
+| **Solana** | 2.3.13  | [Install Solana](https://docs.anza.xyz/cli/install) |
+| **Rust**   | 1.85.0  | [Install Rust](https://www.rust-lang.org/tools/install) |
+| **Anchor** | 0.32.1  | [Install Anchor](https://www.anchor-lang.com/docs/installation) |
+| **Node**   | 24.10.0 | [Install Node](https://nodejs.org/en/download/current) |
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+<Tip>
+  Use version managers like `agave-install` for Solana, `rustup` for Rust, and `avm` for Anchor to easily switch between versions.
+</Tip>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+### Verify your installations
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+```bash
+# Check and initialize your Solana version
+agave-install list
+agave-install init 2.3.13
 
-### Step 3: Go live
+# Check and initialize your Rust version
+rustup show
+rustup install 1.85.0
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+# Check and initialize your Anchor version
+avm list
+avm use 0.32.1
+```
+
+## Run the Anchor Counter example
+
+<Steps>
+  <Step title="Clone the repository">
+    Clone the MagicBlock Engine examples repository:
+
+    ```bash
+    git clone https://github.com/magicblock-labs/magicblock-engine-examples.git
+    cd magicblock-engine-examples/anchor-counter
+    ```
+  </Step>
+
+  <Step title="Install dependencies">
+    Install the required Node.js packages:
+
+    ```bash
+    yarn install
+    ```
+
+    The project uses:
+    - `@coral-xyz/anchor` (0.32.1) - Anchor framework
+    - `@magicblock-labs/ephemeral-rollups-sdk` (0.6.5) - Ephemeral Rollups SDK
+  </Step>
+
+  <Step title="Build and deploy">
+    Build the program and deploy it to the configured cluster:
+
+    ```bash
+    anchor build
+    anchor deploy
+    ```
+
+    <Info>
+      If you want to deploy with a fresh program ID, delete the keypair first:
+      ```bash
+      rm -rf target/deploy/*.keypair
+      anchor build
+      ```
+    </Info>
+  </Step>
+
+  <Step title="Run the tests">
+    Execute the test suite to see delegation, execution, and commits in action:
+
+    ```bash
+    anchor test --skip-deploy --skip-build --skip-local-validator
+    ```
+
+    You'll see output showing:
+    - Counter initialization on Solana base layer
+    - Account delegation to Ephemeral Rollup
+    - Fast increment transactions on the ER
+    - State commits back to Solana
+    - Account undelegation
+  </Step>
+</Steps>
+
+## Understanding the code
+
+### The Counter program
+
+The Anchor Counter program demonstrates the core Ephemeral Rollup pattern:
+
+```rust anchor-counter/programs/anchor-counter/src/lib.rs
+use ephemeral_rollups_sdk::anchor::{commit, delegate, ephemeral};
+
+#[ephemeral]
+#[program]
+pub mod anchor_counter {
+    use super::*;
+
+    /// Initialize the counter
+    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+        let counter = &mut ctx.accounts.counter;
+        counter.count = 0;
+        Ok(())
+    }
+
+    /// Increment the counter
+    pub fn increment(ctx: Context<Increment>) -> Result<()> {
+        let counter = &mut ctx.accounts.counter;
+        counter.count += 1;
+        Ok(())
+    }
+
+    /// Delegate account to Ephemeral Rollup
+    pub fn delegate(ctx: Context<DelegateInput>) -> Result<()> {
+        ctx.accounts.delegate_pda(
+            &ctx.accounts.payer,
+            &[COUNTER_SEED],
+            DelegateConfig::default(),
+        )?;
+        Ok(())
+    }
+}
+```
+
+<Note>
+  The `#[ephemeral]` attribute on the program enables Ephemeral Rollup support. The `#[delegate]` attribute on the context generates delegation boilerplate.
+</Note>
+
+### Delegating an account
+
+Delegation transfers account ownership to the delegation program, making it available in the Ephemeral Rollup:
+
+```typescript anchor-counter/tests/anchor-counter.ts
+const [counterPDA] = anchor.web3.PublicKey.findProgramAddressSync(
+  [Buffer.from("counter")],
+  program.programId
+);
+
+// Delegate the counter to Ephemeral Rollup
+let tx = await program.methods
+  .delegate()
+  .accounts({
+    payer: provider.wallet.publicKey,
+    pda: counterPDA,
+  })
+  .transaction();
+
+const txHash = await provider.sendAndConfirm(tx, [provider.wallet.payer]);
+console.log("Delegate txHash:", txHash);
+```
+
+### Executing on Ephemeral Rollup
+
+Once delegated, transactions execute with millisecond latency:
+
+```typescript
+// Create provider for Ephemeral Rollup
+const providerEphemeralRollup = new anchor.AnchorProvider(
+  new anchor.web3.Connection(
+    process.env.EPHEMERAL_PROVIDER_ENDPOINT || "https://devnet-as.magicblock.app/",
+    {
+      wsEndpoint: process.env.EPHEMERAL_WS_ENDPOINT || "wss://devnet-as.magicblock.app/"
+    }
+  ),
+  anchor.Wallet.local()
+);
+
+// Execute increment on ER - notice the fast execution!
+let tx = await program.methods
+  .increment()
+  .accounts({ counter: counterPDA })
+  .transaction();
+
+tx.feePayer = providerEphemeralRollup.wallet.publicKey;
+tx.recentBlockhash = (
+  await providerEphemeralRollup.connection.getLatestBlockhash()
+).blockhash;
+tx = await providerEphemeralRollup.wallet.signTransaction(tx);
+
+const txHash = await providerEphemeralRollup.sendAndConfirm(tx);
+console.log("ER Increment txHash:", txHash);
+```
+
+### Committing state
+
+Commit account state back to Solana:
+
+```rust
+use ephemeral_rollups_sdk::ephem::commit_accounts;
+
+pub fn commit(ctx: Context<CommitAccounts>) -> Result<()> {
+    commit_accounts(
+        &ctx.accounts.payer,
+        vec![&ctx.accounts.counter.to_account_info()],
+        &ctx.accounts.magic_context,
+        &ctx.accounts.magic_program,
+    )?;
+    Ok(())
+}
+```
+
+## Test output explained
+
+When you run the tests, you'll see timing comparisons:
+
+```
+2000ms (Base Layer) Initialize txHash: abc123...
+1800ms (Base Layer) Increment txHash: def456...
+1500ms (Base Layer) Delegate txHash: ghi789...
+45ms (ER) Increment txHash: jkl012...  ← Notice the speed!
+50ms (ER) Increment and Commit txHash: mno345...
+```
+
+Ephemeral Rollup transactions execute **40-50x faster** than base layer transactions.
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Core Concepts" icon="book" href="/concepts/ephemeral-rollups">
+    Learn how delegation, commits, and transaction routing work
+  </Card>
+  <Card title="Framework Examples" icon="code" href="/examples/anchor-counter">
+    Explore examples for different Solana frameworks
+  </Card>
+  <Card title="Local Development" icon="laptop-code" href="/development/local-setup">
+    Set up a local Ephemeral Rollup validator
+  </Card>
+  <Card title="Advanced Examples" icon="rocket" href="/examples/crank-counter">
+    Try cranks, Magic Actions, and session keys
+  </Card>
 </CardGroup>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Transaction fails with 'Account not found'">
+    Wait a few seconds after delegation before executing transactions on the ER. Account propagation takes 2-3 seconds:
+
+    ```typescript
+    await provider.sendAndConfirm(delegateTx);
+    await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3s
+    ```
+  </Accordion>
+
+  <Accordion title="'Program not deployed' error">
+    Make sure you've deployed to the correct cluster. Check your `Anchor.toml`:
+
+    ```toml
+    [provider]
+    cluster = "localnet"  # or "devnet"
+    ```
+
+    Then deploy:
+    ```bash
+    anchor deploy --provider.cluster localnet
+    ```
+  </Accordion>
+
+  <Accordion title="Version mismatch errors">
+    Ensure all tools match the required versions:
+
+    ```bash
+    solana --version  # Should be 2.3.13
+    rustc --version   # Should be 1.85.0
+    anchor --version  # Should be 0.32.1
+    node --version    # Should be 24.x
+    ```
+
+    Use version managers to switch versions as needed.
+  </Accordion>
+
+  <Accordion title="Insufficient SOL for transactions">
+    Make sure your wallet has SOL on the target cluster:
+
+    ```bash
+    # For localnet
+    solana airdrop 2
+
+    # For devnet
+    solana airdrop 2 --url devnet
+    ```
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+  The Ephemeral Rollups are currently in testing. Contact the MagicBlock team on [Discord](https://discord.com/invite/MBkdC3gxcv) to get access to the testing endpoint.
+</Warning>

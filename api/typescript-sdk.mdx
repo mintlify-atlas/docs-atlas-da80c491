@@ -1,0 +1,768 @@
+---
+title: 'TypeScript SDK'
+description: 'Complete reference for @magicblock-labs/ephemeral-rollups-sdk and @magicblock-labs/bolt-sdk packages'
+---
+
+## Overview
+
+The TypeScript SDK provides functions and utilities to interact with MagicBlock Ephemeral Rollups from client applications. It includes delegation helpers, PDA derivation, connection management, and Bolt ECS integration.
+
+## Installation
+
+<CodeGroup>
+
+```bash npm
+npm install @magicblock-labs/ephemeral-rollups-sdk
+```
+
+```bash yarn
+yarn add @magicblock-labs/ephemeral-rollups-sdk
+```
+
+```bash pnpm
+pnpm add @magicblock-labs/ephemeral-rollups-sdk
+```
+
+</CodeGroup>
+
+For Bolt ECS applications:
+
+<CodeGroup>
+
+```bash npm
+npm install @magicblock-labs/bolt-sdk
+```
+
+```bash yarn
+yarn add @magicblock-labs/bolt-sdk
+```
+
+```bash pnpm
+pnpm add @magicblock-labs/bolt-sdk
+```
+
+</CodeGroup>
+
+## Core Exports
+
+### Constants
+
+```typescript
+import { 
+  DELEGATION_PROGRAM_ID,
+  MAGIC_CONTEXT_ID,
+  MAGIC_PROGRAM_ID
+} from "@magicblock-labs/ephemeral-rollups-sdk";
+```
+
+<ParamField path="DELEGATION_PROGRAM_ID" type="PublicKey">
+  The program ID of the delegation program used to delegate accounts to Ephemeral Rollups
+</ParamField>
+
+<ParamField path="MAGIC_PROGRAM_ID" type="PublicKey">
+  The program ID of the magic program used for committing accounts from ER back to Solana
+</ParamField>
+
+<ParamField path="MAGIC_CONTEXT_ID" type="PublicKey">
+  The magic context account required for commit operations
+</ParamField>
+
+## Connection Management
+
+### Setting up Connections
+
+Establish separate connections for Solana base layer and Ephemeral Rollups:
+
+<Tabs>
+  <Tab title="Web3.js v1">
+    ```typescript
+    import { Connection } from "@solana/web3.js";
+
+    // Base layer connection (Solana)
+    const connectionBaseLayer = new Connection(
+      "https://api.devnet.solana.com",
+      { wsEndpoint: "wss://api.devnet.solana.com" }
+    );
+
+    // Ephemeral Rollup connection
+    const connectionEphemeralRollup = new Connection(
+      "https://devnet-as.magicblock.app/",
+      { wsEndpoint: "wss://devnet-as.magicblock.app/" }
+    );
+    ```
+  </Tab>
+  <Tab title="@solana/kit">
+    ```typescript
+    import { Connection } from "@magicblock-labs/ephemeral-rollups-kit";
+
+    // Base layer connection
+    const connection = await Connection.create(
+      "https://api.devnet.solana.com",
+      "wss://api.devnet.solana.com"
+    );
+
+    // Ephemeral Rollup connection
+    const ephemeralConnection = await Connection.create(
+      "https://devnet-as.magicblock.app",
+      "wss://devnet-as.magicblock.app"
+    );
+    ```
+  </Tab>
+</Tabs>
+
+## PDA Helpers
+
+### delegationRecordPdaFromDelegatedAccount
+
+Derives the delegation record PDA for a delegated account.
+
+```typescript
+import { delegationRecordPdaFromDelegatedAccount } from "@magicblock-labs/ephemeral-rollups-sdk";
+
+const delegationRecord = delegationRecordPdaFromDelegatedAccount(counterPda);
+```
+
+<ParamField path="delegatedAccount" type="PublicKey" required>
+  The account being delegated
+</ParamField>
+
+<ResponseField name="delegationRecord" type="PublicKey">
+  The derived delegation record PDA
+</ResponseField>
+
+### delegationMetadataPdaFromDelegatedAccount
+
+Derives the delegation metadata PDA for a delegated account.
+
+```typescript
+import { delegationMetadataPdaFromDelegatedAccount } from "@magicblock-labs/ephemeral-rollups-sdk";
+
+const delegationMetadata = delegationMetadataPdaFromDelegatedAccount(counterPda);
+```
+
+<ParamField path="delegatedAccount" type="PublicKey" required>
+  The account being delegated
+</ParamField>
+
+<ResponseField name="delegationMetadata" type="PublicKey">
+  The derived delegation metadata PDA
+</ResponseField>
+
+### delegateBufferPdaFromDelegatedAccountAndOwnerProgram
+
+Derives the delegation buffer PDA for a delegated account and its owner program.
+
+```typescript
+import { delegateBufferPdaFromDelegatedAccountAndOwnerProgram } from "@magicblock-labs/ephemeral-rollups-sdk";
+
+const delegationBuffer = delegateBufferPdaFromDelegatedAccountAndOwnerProgram(
+  counterPda,
+  PROGRAM_ID
+);
+```
+
+<ParamField path="delegatedAccount" type="PublicKey" required>
+  The account being delegated
+</ParamField>
+
+<ParamField path="ownerProgram" type="PublicKey" required>
+  The program that owns the delegated account
+</ParamField>
+
+<ResponseField name="delegationBuffer" type="PublicKey">
+  The derived delegation buffer PDA
+</ResponseField>
+
+## Delegation Instructions
+
+While programs typically handle delegation via CPI, you can construct delegation instructions manually for testing or custom flows.
+
+### Manual Delegation Example
+
+<Tabs>
+  <Tab title="Web3.js v1">
+    ```typescript
+    import {
+      Transaction,
+      TransactionInstruction,
+      SystemProgram,
+      sendAndConfirmTransaction
+    } from "@solana/web3.js";
+    import {
+      DELEGATION_PROGRAM_ID,
+      delegationRecordPdaFromDelegatedAccount,
+      delegationMetadataPdaFromDelegatedAccount,
+      delegateBufferPdaFromDelegatedAccountAndOwnerProgram
+    } from "@magicblock-labs/ephemeral-rollups-sdk";
+
+    const tx = new Transaction();
+
+    // Build the delegate instruction
+    const keys = [
+      // Payer
+      {
+        pubkey: userKeypair.publicKey,
+        isSigner: true,
+        isWritable: true,
+      },
+      // System Program
+      {
+        pubkey: SystemProgram.programId,
+        isSigner: false,
+        isWritable: false,
+      },
+      // Account to delegate
+      {
+        pubkey: counterPda,
+        isSigner: false,
+        isWritable: true,
+      },
+      // Owner Program
+      {
+        pubkey: PROGRAM_ID,
+        isSigner: false,
+        isWritable: false,
+      },
+      // Delegation Buffer
+      {
+        pubkey: delegateBufferPdaFromDelegatedAccountAndOwnerProgram(
+          counterPda,
+          PROGRAM_ID
+        ),
+        isSigner: false,
+        isWritable: true,
+      },
+      // Delegation Record
+      {
+        pubkey: delegationRecordPdaFromDelegatedAccount(counterPda),
+        isSigner: false,
+        isWritable: true,
+      },
+      // Delegation Metadata
+      {
+        pubkey: delegationMetadataPdaFromDelegatedAccount(counterPda),
+        isSigner: false,
+        isWritable: true,
+      },
+      // Delegation Program
+      {
+        pubkey: DELEGATION_PROGRAM_ID,
+        isSigner: false,
+        isWritable: false,
+      },
+    ];
+
+    const delegateIx = new TransactionInstruction({
+      keys: keys,
+      programId: PROGRAM_ID,
+      data: Buffer.from("02", "hex"), // Your program's delegate discriminator
+    });
+
+    tx.add(delegateIx);
+    const txHash = await sendAndConfirmTransaction(
+      connectionBaseLayer,
+      tx,
+      [userKeypair],
+      { skipPreflight: true, commitment: "confirmed" }
+    );
+    ```
+  </Tab>
+  <Tab title="@solana/kit">
+    ```typescript
+    import {
+      AccountRole,
+      createTransactionMessage,
+      appendTransactionMessageInstructions,
+      pipe,
+      setTransactionMessageFeePayer,
+      Instruction
+    } from '@solana/kit';
+    import { SYSTEM_PROGRAM_ADDRESS } from "@solana-program/system";
+    import {
+      DELEGATION_PROGRAM_ID,
+      delegationRecordPdaFromDelegatedAccount,
+      delegationMetadataPdaFromDelegatedAccount,
+      delegateBufferPdaFromDelegatedAccountAndOwnerProgram
+    } from "@magicblock-labs/ephemeral-rollups-kit";
+
+    const accounts = [
+      { address: userPubkey, role: AccountRole.WRITABLE_SIGNER },
+      { address: SYSTEM_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+      { address: counterPda, role: AccountRole.WRITABLE },
+      { address: PROGRAM_ID, role: AccountRole.READONLY },
+      {
+        address: await delegateBufferPdaFromDelegatedAccountAndOwnerProgram(
+          counterPda,
+          PROGRAM_ID
+        ),
+        role: AccountRole.WRITABLE
+      },
+      {
+        address: await delegationRecordPdaFromDelegatedAccount(counterPda),
+        role: AccountRole.WRITABLE
+      },
+      {
+        address: await delegationMetadataPdaFromDelegatedAccount(counterPda),
+        role: AccountRole.WRITABLE
+      },
+      { address: DELEGATION_PROGRAM_ID, role: AccountRole.READONLY },
+    ];
+
+    const delegateIx: Instruction = {
+      accounts,
+      programAddress: PROGRAM_ID,
+      data: Buffer.from("02", "hex"), // Your program's delegate discriminator
+    };
+
+    const transactionMessage = pipe(
+      createTransactionMessage({ version: 0 }),
+      tx => setTransactionMessageFeePayer(userPubkey, tx),
+      tx => appendTransactionMessageInstructions([delegateIx], tx)
+    );
+
+    const txHash = await connection.sendAndConfirmTransaction(
+      transactionMessage,
+      [userKeypair],
+      { commitment: "confirmed", skipPreflight: true }
+    );
+    ```
+  </Tab>
+</Tabs>
+
+## Commitment Operations
+
+### GetCommitmentSignature
+
+Waits for and returns the base layer commitment signature after committing state from ER.
+
+<Tabs>
+  <Tab title="Web3.js v1">
+    ```typescript
+    import { GetCommitmentSignature } from "@magicblock-labs/ephemeral-rollups-sdk";
+
+    // After sending a commit transaction on ER
+    const txHash = await sendAndConfirmTransaction(
+      connectionEphemeralRollup,
+      commitTx,
+      [userKeypair]
+    );
+
+    // Wait for the commitment on base layer
+    const txCommitSignature = await GetCommitmentSignature(
+      txHash,
+      connectionEphemeralRollup
+    );
+
+    console.log(`Base layer commit signature: ${txCommitSignature}`);
+    ```
+  </Tab>
+  <Tab title="@solana/kit">
+    ```typescript
+    // After sending a commit transaction on ER
+    const txHash = await ephemeralConnection.sendAndConfirmTransaction(
+      transactionMessage,
+      [userKeypair]
+    );
+
+    // Wait for the commitment on base layer
+    const txCommitSignature = await ephemeralConnection.getCommitmentSignature(
+      txHash
+    );
+
+    console.log(`Base layer commit signature: ${txCommitSignature}`);
+    ```
+  </Tab>
+</Tabs>
+
+<ParamField path="txHash" type="string" required>
+  The transaction hash of the commit transaction sent on the Ephemeral Rollup
+</ParamField>
+
+<ParamField path="connection" type="Connection" required>
+  The Ephemeral Rollup connection instance
+</ParamField>
+
+<ResponseField name="commitSignature" type="string">
+  The transaction signature on the base layer Solana chain
+</ResponseField>
+
+### Commit Transaction Example
+
+<Tabs>
+  <Tab title="Web3.js v1">
+    ```typescript
+    import {
+      Transaction,
+      TransactionInstruction,
+      sendAndConfirmTransaction
+    } from "@solana/web3.js";
+    import {
+      MAGIC_PROGRAM_ID,
+      MAGIC_CONTEXT_ID,
+      GetCommitmentSignature
+    } from "@magicblock-labs/ephemeral-rollups-sdk";
+
+    const tx = new Transaction();
+    const keys = [
+      // Payer
+      {
+        pubkey: userKeypair.publicKey,
+        isSigner: true,
+        isWritable: true,
+      },
+      // Account to commit
+      {
+        pubkey: counterPda,
+        isSigner: false,
+        isWritable: true,
+      },
+      // Magic Program
+      {
+        pubkey: MAGIC_PROGRAM_ID,
+        isSigner: false,
+        isWritable: false,
+      },
+      // Magic Context
+      {
+        pubkey: MAGIC_CONTEXT_ID,
+        isSigner: false,
+        isWritable: true,
+      }
+    ];
+
+    const commitIx = new TransactionInstruction({
+      keys: keys,
+      programId: PROGRAM_ID,
+      data: Buffer.from("04", "hex"), // Commit instruction discriminator
+    });
+
+    tx.add(commitIx);
+    const txHash = await sendAndConfirmTransaction(
+      connectionEphemeralRollup,
+      tx,
+      [userKeypair],
+      { skipPreflight: true, commitment: "confirmed" }
+    );
+
+    // Wait for base layer confirmation
+    const txCommitSgn = await GetCommitmentSignature(
+      txHash,
+      connectionEphemeralRollup
+    );
+    console.log(`Committed to base layer: ${txCommitSgn}`);
+    ```
+  </Tab>
+  <Tab title="@solana/kit">
+    ```typescript
+    import {
+      AccountRole,
+      createTransactionMessage,
+      appendTransactionMessageInstructions,
+      pipe,
+      setTransactionMessageFeePayer,
+      address,
+      Instruction
+    } from '@solana/kit';
+    import {
+      MAGIC_PROGRAM_ID,
+      MAGIC_CONTEXT_ID
+    } from "@magicblock-labs/ephemeral-rollups-kit";
+
+    const accounts = [
+      { address: userPubkey, role: AccountRole.WRITABLE_SIGNER },
+      { address: counterPda, role: AccountRole.WRITABLE },
+      { address: address(MAGIC_PROGRAM_ID.toString()), role: AccountRole.READONLY },
+      { address: address(MAGIC_CONTEXT_ID.toString()), role: AccountRole.WRITABLE }
+    ];
+
+    const commitIx: Instruction = {
+      accounts,
+      programAddress: PROGRAM_ID,
+      data: Buffer.from("04", "hex"), // Commit instruction discriminator
+    };
+
+    const transactionMessage = pipe(
+      createTransactionMessage({ version: 0 }),
+      tx => setTransactionMessageFeePayer(userPubkey, tx),
+      tx => appendTransactionMessageInstructions([commitIx], tx)
+    );
+
+    const txHash = await ephemeralConnection.sendAndConfirmTransaction(
+      transactionMessage,
+      [userKeypair],
+      { commitment: "confirmed", skipPreflight: true }
+    );
+
+    // Wait for base layer confirmation
+    const txCommitSgn = await ephemeralConnection.getCommitmentSignature(txHash);
+    console.log(`Committed to base layer: ${txCommitSgn}`);
+    ```
+  </Tab>
+</Tabs>
+
+## Bolt SDK (ECS)
+
+For Bolt Entity Component System applications, use the Bolt SDK for specialized ECS operations.
+
+### Installation
+
+```bash
+npm install @magicblock-labs/bolt-sdk
+```
+
+### Imports
+
+```typescript
+import {
+  InitializeNewWorld,
+  AddEntity,
+  InitializeComponent,
+  ApplySystem,
+  FindComponentPda,
+  createDelegateInstruction,
+  createUndelegateInstruction,
+  DELEGATION_PROGRAM_ID
+} from "@magicblock-labs/bolt-sdk";
+```
+
+### ApplySystem
+
+Executes a system on entities with specified components in the Bolt ECS framework.
+
+```typescript
+import { ApplySystem } from "@magicblock-labs/bolt-sdk";
+
+const applySystem = await ApplySystem({
+  authority: provider.wallet.publicKey,
+  world: worldPda,
+  entities: [
+    {
+      entity: entityPda,
+      components: [{ componentId: counterComponent.programId }],
+    },
+  ],
+  systemId: systemIncrease.programId,
+});
+
+const tx = applySystem.transaction;
+const txSign = await providerEphemeralRollup.sendAndConfirm(
+  tx,
+  [],
+  { skipPreflight: true }
+);
+```
+
+<ParamField path="authority" type="PublicKey" required>
+  The wallet with authority to execute the system
+</ParamField>
+
+<ParamField path="world" type="PublicKey" required>
+  The world PDA in which the system operates
+</ParamField>
+
+<ParamField path="entities" type="Array<{ entity: PublicKey, components: Array<{ componentId: PublicKey }> }>" required>
+  Array of entities and their components that the system will operate on
+</ParamField>
+
+<ParamField path="systemId" type="PublicKey" required>
+  The program ID of the system to execute
+</ParamField>
+
+<ResponseField name="transaction" type="Transaction">
+  The constructed transaction ready to be signed and sent
+</ResponseField>
+
+### FindComponentPda
+
+Finds the PDA for a component attached to an entity.
+
+```typescript
+import { FindComponentPda } from "@magicblock-labs/bolt-sdk";
+
+const counterPda = FindComponentPda({
+  componentId: counterComponent.programId,
+  entity: entityPda,
+});
+```
+
+<ParamField path="componentId" type="PublicKey" required>
+  The program ID of the component
+</ParamField>
+
+<ParamField path="entity" type="PublicKey" required>
+  The entity PDA
+</ParamField>
+
+<ResponseField name="componentPda" type="PublicKey">
+  The derived component PDA
+</ResponseField>
+
+### createDelegateInstruction
+
+Creates an instruction to delegate a Bolt component to an Ephemeral Rollup.
+
+```typescript
+import { createDelegateInstruction } from "@magicblock-labs/bolt-sdk";
+
+const counterPda = FindComponentPda({
+  componentId: counterComponent.programId,
+  entity: entityPda,
+});
+
+const delegateIx = createDelegateInstruction({
+  entity: entityPda,
+  account: counterPda,
+  ownerProgram: counterComponent.programId,
+  payer: provider.wallet.publicKey,
+});
+
+const tx = new anchor.web3.Transaction().add(delegateIx);
+const txSign = await provider.sendAndConfirm(tx);
+```
+
+<ParamField path="entity" type="PublicKey" required>
+  The entity that owns the component
+</ParamField>
+
+<ParamField path="account" type="PublicKey" required>
+  The component account to delegate
+</ParamField>
+
+<ParamField path="ownerProgram" type="PublicKey" required>
+  The component's program ID
+</ParamField>
+
+<ParamField path="payer" type="PublicKey" required>
+  The account paying for the delegation
+</ParamField>
+
+<ResponseField name="instruction" type="TransactionInstruction">
+  The delegation instruction
+</ResponseField>
+
+### createUndelegateInstruction
+
+Creates an instruction to undelegate a Bolt component from an Ephemeral Rollup.
+
+```typescript
+import { createUndelegateInstruction } from "@magicblock-labs/bolt-sdk";
+
+const counterComponentPda = FindComponentPda({
+  componentId: counterComponent.programId,
+  entity: entityPda,
+});
+
+const undelegateIx = createUndelegateInstruction({
+  payer: provider.wallet.publicKey,
+  delegatedAccount: counterComponentPda,
+  componentPda: counterComponent.programId,
+});
+
+let tx = new anchor.web3.Transaction().add(undelegateIx);
+const txSign = await providerEphemeralRollup.sendAndConfirm(tx);
+```
+
+<ParamField path="payer" type="PublicKey" required>
+  The account paying for the undelegation
+</ParamField>
+
+<ParamField path="delegatedAccount" type="PublicKey" required>
+  The component account to undelegate
+</ParamField>
+
+<ParamField path="componentPda" type="PublicKey" required>
+  The component's program ID
+</ParamField>
+
+<ResponseField name="instruction" type="TransactionInstruction">
+  The undelegation instruction
+</ResponseField>
+
+## Complete Example
+
+Here's a complete workflow demonstrating delegation, execution on ER, and undelegation:
+
+```typescript
+import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import {
+  DELEGATION_PROGRAM_ID,
+  MAGIC_PROGRAM_ID,
+  MAGIC_CONTEXT_ID,
+  delegationRecordPdaFromDelegatedAccount,
+  delegationMetadataPdaFromDelegatedAccount,
+  delegateBufferPdaFromDelegatedAccountAndOwnerProgram,
+  GetCommitmentSignature
+} from "@magicblock-labs/ephemeral-rollups-sdk";
+
+// Setup connections
+const baseConnection = new Connection("https://api.devnet.solana.com");
+const erConnection = new Connection("https://devnet-as.magicblock.app/");
+
+const userKeypair = Keypair.generate();
+const [counterPda] = PublicKey.findProgramAddressSync(
+  [Buffer.from("counter"), userKeypair.publicKey.toBuffer()],
+  PROGRAM_ID
+);
+
+// 1. Delegate to ER (on base layer)
+const delegateTx = await buildDelegateTransaction(
+  userKeypair.publicKey,
+  counterPda,
+  PROGRAM_ID
+);
+const delegateSig = await sendAndConfirmTransaction(
+  baseConnection,
+  delegateTx,
+  [userKeypair]
+);
+
+// 2. Execute transactions on ER
+const incrementTx = await buildIncrementTransaction(
+  userKeypair.publicKey,
+  counterPda
+);
+const incrementSig = await sendAndConfirmTransaction(
+  erConnection,
+  incrementTx,
+  [userKeypair]
+);
+
+// 3. Commit and undelegate (on ER)
+const commitTx = await buildCommitAndUndelegateTransaction(
+  userKeypair.publicKey,
+  counterPda
+);
+const commitSig = await sendAndConfirmTransaction(
+  erConnection,
+  commitTx,
+  [userKeypair]
+);
+
+// 4. Wait for base layer commitment
+const baseSig = await GetCommitmentSignature(commitSig, erConnection);
+console.log(`State committed to base layer: ${baseSig}`);
+```
+
+## Network Endpoints
+
+### Devnet
+
+- **Base Layer**: `https://api.devnet.solana.com` (wss: `wss://api.devnet.solana.com`)
+- **Ephemeral Rollups**: `https://devnet-as.magicblock.app/` (wss: `wss://devnet-as.magicblock.app/`)
+
+### Localnet
+
+When running against localnet, you may need to include the validator identity as a remaining account:
+
+```typescript
+const remainingAccounts = connection.rpcEndpoint.includes("localhost") ||
+                          connection.rpcEndpoint.includes("127.0.0.1")
+  ? [
+      {
+        pubkey: new PublicKey("mAGicPQYBMvcYveUZA5F5UNNwyHvfYh5xkLS2Fr1mev"),
+        isSigner: false,
+        isWritable: false,
+      },
+    ]
+  : [];
+```

@@ -1,0 +1,509 @@
+---
+title: Transaction execution
+description: Learn how to execute transactions in Ephemeral Rollups for low-latency operations
+---
+
+Once accounts are delegated to an Ephemeral Rollup, you can execute transactions with minimal latency (typically 50-100ms). Transactions in ERs work identically to Solana transactions, but connect to the ER endpoint instead of the base layer.
+
+## Overview
+
+Transactions in Ephemeral Rollups:
+
+- Execute on delegated accounts with sub-100ms latency
+- Use the same instruction format as Solana
+- Support all program types (Anchor, native Rust, Bolt, etc.)
+- Automatically commit to the base layer at configured intervals
+- Can be manually committed or undelegated at any time
+
+## Connection setup
+
+To execute transactions on an ER, create a connection to the ER endpoint instead of the base layer.
+
+### Anchor connection
+
+From the [anchor-counter](/examples/anchor-counter) example:
+
+```typescript /home/daytona/workspace/source/anchor-counter/tests/anchor-counter.ts
+import * as anchor from "@coral-xyz/anchor";
+
+// Base layer connection (Solana)
+const provider = anchor.AnchorProvider.env();
+
+// Ephemeral Rollup connection
+const providerEphemeralRollup = new anchor.AnchorProvider(
+  new anchor.web3.Connection(
+    process.env.EPHEMERAL_PROVIDER_ENDPOINT || "https://devnet-as.magicblock.app/",
+    {
+      wsEndpoint:
+        process.env.EPHEMERAL_WS_ENDPOINT || "wss://devnet-as.magicblock.app/",
+    }
+  ),
+  anchor.Wallet.local()
+);
+
+console.log("Base Layer:", provider.connection.rpcEndpoint);
+console.log("Ephemeral Rollup:", providerEphemeralRollup.connection.rpcEndpoint);
+```
+
+### Web3.js connection
+
+From the [rust-counter](/examples/rust-counter) example:
+
+```typescript /home/daytona/workspace/source/rust-counter/tests/web3js/rust-counter.test.ts
+import { Connection } from "@solana/web3.js";
+
+// Base layer connection
+const connectionBaseLayer = new Connection(
+  process.env.PROVIDER_ENDPOINT || "https://api.devnet.solana.com",
+  { wsEndpoint: process.env.WS_ENDPOINT || "wss://api.devnet.solana.com" }
+);
+
+// Ephemeral Rollup connection
+const connectionEphemeralRollup = new Connection(
+  process.env.EPHEMERAL_PROVIDER_ENDPOINT || "https://devnet-as.magicblock.app/",
+  { wsEndpoint: process.env.EPHEMERAL_WS_ENDPOINT || "wss://devnet-as.magicblock.app/" }
+);
+```
+
+<Note>
+You need **both** connections: one for base layer operations (delegation/undelegation) and one for ER execution.
+</Note>
+
+## Environment configuration
+
+Set these environment variables to configure your ER endpoints:
+
+<Tabs>
+  <Tab title="Devnet">
+    ```bash
+    export EPHEMERAL_PROVIDER_ENDPOINT="https://devnet-as.magicblock.app/"
+    export EPHEMERAL_WS_ENDPOINT="wss://devnet-as.magicblock.app/"
+    ```
+  </Tab>
+  <Tab title="Local">
+    ```bash
+    # Base layer (local Solana test validator)
+    export PROVIDER_ENDPOINT="http://localhost:8899"
+    export WS_ENDPOINT="ws://localhost:8900"
+
+    # Ephemeral Rollup (local MagicBlock validator)
+    export EPHEMERAL_PROVIDER_ENDPOINT="http://localhost:7799"
+    export EPHEMERAL_WS_ENDPOINT="ws://localhost:7800"
+    ```
+  </Tab>
+</Tabs>
+
+## Executing transactions
+
+Transactions on ERs follow the same pattern as Solana, but use the ER connection.
+
+### Anchor transactions
+
+From the [anchor-counter](/examples/anchor-counter) test:
+
+```typescript
+it("Increase counter on ER", async () => {
+  const start = Date.now();
+  
+  // Build the transaction
+  let tx = await program.methods
+    .increment()
+    .accounts({
+      counter: counterPDA,
+    })
+    .transaction();
+  
+  // Set fee payer and recent blockhash from ER
+  tx.feePayer = providerEphemeralRollup.wallet.publicKey;
+  tx.recentBlockhash = (
+    await providerEphemeralRollup.connection.getLatestBlockhash()
+  ).blockhash;
+  
+  // Sign with ER wallet
+  tx = await providerEphemeralRollup.wallet.signTransaction(tx);
+  
+  // Send to ER
+  const txHash = await providerEphemeralRollup.sendAndConfirm(tx);
+  
+  const duration = Date.now() - start;
+  console.log(`${duration}ms (ER) Increment txHash: ${txHash}`);
+  // Typical output: "87ms (ER) Increment txHash: ..."
+});
+```
+
+### Native Web3.js transactions
+
+From the [rust-counter](/examples/rust-counter) test:
+
+```typescript
+import { Transaction, TransactionInstruction, sendAndConfirmTransaction } from "@solana/web3.js";
+import * as borsh from "borsh";
+
+it("Increase counter on ER", async () => {
+  const start = Date.now();
+  
+  // Create transaction
+  const tx = new Transaction();
+  
+  // Define accounts
+  const keys = [
+    {
+      pubkey: userKeypair.publicKey,
+      isSigner: true,
+      isWritable: true,
+    },
+    {
+      pubkey: counterPda,
+      isSigner: false,
+      isWritable: true,
+    },
+  ];
+  
+  // Serialize instruction data
+  const serializedInstructionData = Buffer.concat([
+    Buffer.from(CounterInstruction.IncreaseCounter, "hex"),
+    borsh.serialize(IncreaseCounterPayload.schema, new IncreaseCounterPayload(1)),
+  ]);
+  
+  // Create instruction
+  const incrementIx = new TransactionInstruction({
+    keys: keys,
+    programId: PROGRAM_ID,
+    data: serializedInstructionData,
+  });
+  
+  tx.add(incrementIx);
+  
+  // Send to ER
+  const txHash = await sendAndConfirmTransaction(
+    connectionEphemeralRollup,
+    tx,
+    [userKeypair],
+    {
+      skipPreflight: true,
+      commitment: "confirmed",
+    }
+  );
+  
+  const duration = Date.now() - start;
+  console.log(`${duration}ms (ER) Increment txHash: ${txHash}`);
+});
+```
+
+### Bolt transactions
+
+From the [bolt-counter](/examples/bolt-counter) test:
+
+```typescript
+import { ApplySystem } from "@magicblock-labs/bolt-sdk";
+
+it("Apply the increase system", async () => {
+  const applySystem = await ApplySystem({
+    authority: providerEphemeralRollup.wallet.publicKey,
+    world: worldPda,
+    entities: [
+      {
+        entity: entityPda,
+        components: [{ componentId: counterComponent.programId }],
+      },
+    ],
+    systemId: systemIncrease.programId,
+  });
+  
+  const tx = applySystem.transaction;
+  tx.feePayer = provider.wallet.publicKey;
+  tx.recentBlockhash = (
+    await providerEphemeralRollup.connection.getLatestBlockhash()
+  ).blockhash;
+  
+  const txSign = await providerEphemeralRollup.sendAndConfirm(tx, [], {
+    skipPreflight: true,
+  });
+  
+  console.log(`Applied system: ${txSign}`);
+});
+```
+
+## Transaction confirmation
+
+ER transactions can be confirmed using standard Solana confirmation strategies:
+
+```typescript
+// Option 1: sendAndConfirm (recommended)
+const txHash = await providerEphemeralRollup.sendAndConfirm(tx, [], {
+  skipPreflight: true,
+  commitment: "confirmed",
+});
+
+// Option 2: Manual confirmation
+const signature = await providerEphemeralRollup.connection.sendRawTransaction(
+  tx.serialize()
+);
+
+await providerEphemeralRollup.connection.confirmTransaction(
+  signature,
+  "confirmed"
+);
+```
+
+<Tip>
+Use `skipPreflight: true` for faster transaction submission. Preflight checks add unnecessary latency in ERs.
+</Tip>
+
+## Committing state
+
+State changes in ERs can be committed to the base layer in three ways:
+
+### Automatic commits
+
+State automatically commits at the interval specified during delegation:
+
+```rust
+let delegate_config = DelegateConfig {
+    commit_frequency_ms: 30_000, // Commit every 30 seconds
+    validator: None,
+};
+```
+
+### Manual commits
+
+You can manually commit state from within your program:
+
+```rust /home/daytona/workspace/source/anchor-counter/programs/anchor-counter/src/lib.rs
+use ephemeral_rollups_sdk::ephem::commit_accounts;
+
+pub fn commit(ctx: Context<IncrementAndCommit>) -> Result<()> {
+    commit_accounts(
+        &ctx.accounts.payer,
+        vec![&ctx.accounts.counter.to_account_info()],
+        &ctx.accounts.magic_context,
+        &ctx.accounts.magic_program,
+    )?;
+    Ok(())
+}
+```
+
+Execute the commit from the client:
+
+```typescript
+let tx = await program.methods
+  .commit()
+  .accounts({ payer: providerEphemeralRollup.wallet.publicKey })
+  .transaction();
+
+tx.feePayer = providerEphemeralRollup.wallet.publicKey;
+tx.recentBlockhash = (
+  await providerEphemeralRollup.connection.getLatestBlockhash()
+).blockhash;
+
+const txHash = await providerEphemeralRollup.sendAndConfirm(tx);
+```
+
+### Tracking commit confirmations
+
+Use the SDK to wait for commit finalization on the base layer:
+
+```typescript
+import { GetCommitmentSignature } from "@magicblock-labs/ephemeral-rollups-sdk";
+
+// Execute commit on ER
+const txHash = await providerEphemeralRollup.sendAndConfirm(commitTx);
+console.log("ER commit tx:", txHash);
+
+// Wait for base layer confirmation
+const baseTxHash = await GetCommitmentSignature(
+  txHash,
+  providerEphemeralRollup.connection
+);
+console.log("Base layer commit tx:", baseTxHash);
+```
+
+<Info>
+The commit transaction executes on the ER instantly, but takes several seconds to finalize on the base layer.
+</Info>
+
+## Commit and undelegate
+
+To commit final state and return the account to the base layer:
+
+```rust /home/daytona/workspace/source/anchor-counter/programs/anchor-counter/src/lib.rs
+use ephemeral_rollups_sdk::ephem::commit_and_undelegate_accounts;
+
+pub fn increment_and_undelegate(ctx: Context<IncrementAndCommit>) -> Result<()> {
+    let counter = &mut ctx.accounts.counter;
+    counter.count += 1;
+    
+    // Serialize the account state
+    counter.exit(&crate::ID)?;
+    
+    // Commit and undelegate in one operation
+    commit_and_undelegate_accounts(
+        &ctx.accounts.payer,
+        vec![&ctx.accounts.counter.to_account_info()],
+        &ctx.accounts.magic_context,
+        &ctx.accounts.magic_program,
+    )?;
+    
+    Ok(())
+}
+```
+
+From the client:
+
+```typescript
+let tx = await program.methods
+  .incrementAndUndelegate()
+  .accounts({ payer: providerEphemeralRollup.wallet.publicKey })
+  .transaction();
+
+tx.feePayer = providerEphemeralRollup.wallet.publicKey;
+tx.recentBlockhash = (
+  await providerEphemeralRollup.connection.getLatestBlockhash()
+).blockhash;
+
+const txHash = await providerEphemeralRollup.sendAndConfirm(tx);
+console.log("Undelegate tx:", txHash);
+
+// Wait for confirmation on base layer
+const baseTxHash = await GetCommitmentSignature(
+  txHash,
+  providerEphemeralRollup.connection
+);
+console.log("Base layer undelegate tx:", baseTxHash);
+```
+
+## Performance comparison
+
+Typical transaction latencies:
+
+| Operation | Base Layer (Solana) | Ephemeral Rollup |
+|-----------|---------------------|------------------|
+| Initialize | 2000-3000ms | N/A (done on base) |
+| Delegate | 2000-3000ms | N/A (done on base) |
+| Increment | 2000-3000ms | **50-100ms** |
+| Commit | N/A | 50-100ms (ER) + 2000-3000ms (base confirmation) |
+| Undelegate | 2000-3000ms (on ER) + wait for base confirmation | N/A |
+
+<Warning>
+Delegation and undelegation must be executed on the **base layer** connection, not the ER connection.
+</Warning>
+
+## Transaction lifecycle example
+
+Complete flow from the [anchor-counter](/examples/anchor-counter) test:
+
+<Steps>
+
+### Initialize on base layer
+
+```typescript
+// Uses base layer connection
+const tx = await program.methods.initialize()
+  .accounts({ user: provider.wallet.publicKey })
+  .transaction();
+  
+const txHash = await provider.sendAndConfirm(tx);
+console.log("2847ms (Base Layer) Initialize");
+```
+
+### Delegate to ER
+
+```typescript
+// Uses base layer connection
+const tx = await program.methods.delegate()
+  .accounts({ payer: provider.wallet.publicKey, pda: counterPDA })
+  .transaction();
+  
+const txHash = await provider.sendAndConfirm(tx);
+console.log("2341ms (Base Layer) Delegate");
+
+// Wait for delegation to propagate
+await new Promise((resolve) => setTimeout(resolve, 3000));
+```
+
+### Execute on ER (fast)
+
+```typescript
+// Uses ER connection
+let tx = await program.methods.increment()
+  .accounts({ counter: counterPDA })
+  .transaction();
+  
+tx.feePayer = providerER.wallet.publicKey;
+tx.recentBlockhash = (await providerER.connection.getLatestBlockhash()).blockhash;
+tx = await providerER.wallet.signTransaction(tx);
+
+const txHash = await providerER.sendAndConfirm(tx);
+console.log("73ms (ER) Increment"); // 30x faster!
+```
+
+### Commit state
+
+```typescript
+// Uses ER connection
+let tx = await program.methods.commit()
+  .accounts({ payer: providerER.wallet.publicKey })
+  .transaction();
+  
+tx.feePayer = providerER.wallet.publicKey;
+tx.recentBlockhash = (await providerER.connection.getLatestBlockhash()).blockhash;
+
+const txHash = await providerER.sendAndConfirm(tx);
+console.log("68ms (ER) Commit");
+
+// Wait for base layer confirmation
+const baseTxHash = await GetCommitmentSignature(txHash, providerER.connection);
+console.log("2456ms (Base Layer) Commit finalized");
+```
+
+### Undelegate
+
+```typescript
+// Uses ER connection for transaction, but commits to base layer
+let tx = await program.methods.incrementAndUndelegate()
+  .accounts({ payer: providerER.wallet.publicKey })
+  .transaction();
+  
+tx.feePayer = providerER.wallet.publicKey;
+tx.recentBlockhash = (await providerER.connection.getLatestBlockhash()).blockhash;
+
+const txHash = await providerER.sendAndConfirm(tx);
+console.log("81ms (ER) Undelegate");
+```
+
+</Steps>
+
+## Best practices
+
+<CardGroup cols={2}>
+  <Card title="Skip preflight" icon="forward">
+    Use `skipPreflight: true` to reduce latency. ER validators handle validation efficiently.
+  </Card>
+  <Card title="Batch operations" icon="layer-group">
+    Execute multiple operations on the ER before committing to minimize base layer costs.
+  </Card>
+  <Card title="Connection management" icon="plug">
+    Maintain separate connections for base layer and ER operations.
+  </Card>
+  <Card title="Error handling" icon="shield-check">
+    Handle ER connection failures gracefully and retry on the base layer if needed.
+  </Card>
+</CardGroup>
+
+## Examples
+
+- [Anchor Counter](/examples/anchor-counter) - Basic transaction execution with Anchor
+- [Rust Counter](/examples/rust-counter) - Native Web3.js transaction handling
+- [Bolt Counter](/examples/bolt-counter) - ECS system execution on ERs
+- [Session Keys](/examples/session-keys) - Temporary signing authorities
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Account delegation" icon="arrow-right-arrow-left" href="/concepts/delegation">
+    Learn how to delegate accounts to ERs
+  </Card>
+  <Card title="Ephemeral Rollups" icon="layer-group" href="/concepts/ephemeral-rollups">
+    Understand the complete ER architecture
+  </Card>
+</CardGroup>

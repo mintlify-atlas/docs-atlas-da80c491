@@ -1,0 +1,499 @@
+---
+title: Rust Counter
+description: Simple counter program using native Rust without Anchor framework and Ephemeral Rollups
+---
+
+A simple counter program demonstrating how to use native Rust (without Anchor) with Ephemeral Rollups. This example shows the low-level implementation of delegation, transaction execution, and state management using Borsh serialization.
+
+## What You'll Learn
+
+- How to implement Ephemeral Rollups delegation in native Rust
+- How to use Borsh serialization for instruction data
+- How to manually handle CPI calls to the delegation program
+- How to structure a native Solana program with multiple instructions
+- How to commit and undelegate accounts without Anchor macros
+
+## Program Structure
+
+The Rust counter program includes the following instructions:
+
+- **0: InitializeCounter** - Initialize the counter PDA to 0
+- **1: IncreaseCounter** - Increase the counter by a specified amount
+- **2: Delegate** - Delegate the counter account to Ephemeral Rollups
+- **3: CommitAndUndelegate** - Commit and undelegate the account
+- **4: Commit** - Commit changes to the base layer
+- **5: IncrementAndCommit** - Increment and commit in one instruction
+- **6: IncrementAndUndelegate** - Increment and undelegate in one instruction
+- **7: Undelegate** - Undelegate with custom PDA seeds
+
+## Software Requirements
+
+<Note>
+Ensure you have the following software packages installed before building the program.
+</Note>
+
+| Software   | Version | Installation Guide                                      |
+| ---------- | ------- | ------------------------------------------------------- |
+| **Solana** | 2.3.13  | [Install Solana](https://docs.anza.xyz/cli/install)     |
+| **Rust**   | 1.85.0  | [Install Rust](https://www.rust-lang.org/tools/install) |
+| **Node**   | 24.10.0 | [Install Node](https://nodejs.org/en/download/current)  |
+
+```sh
+# Check and initialize your Solana version
+agave-install list
+agave-install init 2.3.13
+
+# Check and initialize your Rust version
+rustup show
+rustup install 1.85.0
+```
+
+## Build and Test
+
+<Steps>
+  <Step title="Build the program">
+    Build the Solana program using the BPF toolchain:
+    
+    ```bash
+    cargo build-sbf
+    ```
+  </Step>
+
+  <Step title="Deploy the program">
+    Deploy the compiled program to your chosen cluster:
+    
+    ```bash
+    solana program deploy target/deploy/rust_counter.so
+    ```
+  </Step>
+
+  <Step title="Configure environment">
+    Add your wallet private key and RPC endpoints to `.env`:
+    
+    ```bash
+    PRIVATE_KEY=
+    ```
+  </Step>
+
+  <Step title="Run tests">
+    Install dependencies and run the test suite:
+    
+    ```bash
+    yarn install
+    yarn test
+    ```
+  </Step>
+</Steps>
+
+## Program Implementation
+
+### Project Structure
+
+The native Rust program is organized into modules:
+
+```rust
+pub mod entrypoint; // entrypoint where the Solana program process starts
+pub mod processor;  // where instruction logics are processed
+pub mod instruction; // where instruction discriminators are defined
+pub mod state;      // where on-chain account structures are defined
+```
+
+### Instruction Enum
+
+Instructions are defined as an enum with associated data:
+
+```rust
+use borsh::BorshDeserialize;
+
+pub enum ProgramInstruction {
+    InitializeCounter,
+    IncreaseCounter { increase_by: u64 },
+    Delegate,
+    CommitAndUndelegate,
+    Commit,
+    Undelegate { pda_seeds: Vec<Vec<u8>> },
+    IncrementAndCommit { increase_by: u64 },
+    IncrementAndUndelegate { increase_by: u64 },
+}
+
+impl ProgramInstruction {
+    pub fn unpack(input: &[u8]) -> Result<Self, ProgramError> {
+        // Extract the first 8 bytes as variant discriminator
+        let (ix_discriminator, rest) = input.split_at(8);
+
+        Ok(match ix_discriminator {
+            [0, 0, 0, 0, 0, 0, 0, 0] => Self::InitializeCounter,
+            [1, 0, 0, 0, 0, 0, 0, 0] => {
+                let payload = IncreaseCounterPayload::try_from_slice(rest)?;
+                Self::IncreaseCounter {
+                    increase_by: payload.increase_by,
+                }
+            }
+            [2, 0, 0, 0, 0, 0, 0, 0] => Self::Delegate,
+            // ... other variants
+            _ => return Err(ProgramError::InvalidInstructionData),
+        })
+    }
+}
+```
+
+### State Definition
+
+The counter state uses Borsh for serialization:
+
+```rust
+use borsh::{BorshDeserialize, BorshSerialize};
+
+#[derive(BorshSerialize, BorshDeserialize, Debug)]
+pub struct Counter {
+    pub count: u64,
+}
+
+impl Counter {
+    pub const SIZE: usize = 8; // 8 bytes for u64
+}
+```
+
+### Delegation Implementation
+
+The delegation function shows how to manually handle CPI calls:
+
+```rust
+use ephemeral_rollups_sdk::cpi::{
+    delegate_account, DelegateAccounts, DelegateConfig,
+};
+
+pub fn process_delegate(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    // Get accounts
+    let account_info_iter = &mut accounts.iter();
+    let initializer = next_account_info(account_info_iter)?;
+    let system_program = next_account_info(account_info_iter)?;
+    let pda_to_delegate = next_account_info(account_info_iter)?;
+    let owner_program = next_account_info(account_info_iter)?;
+    let delegation_buffer = next_account_info(account_info_iter)?;
+    let delegation_record = next_account_info(account_info_iter)?;
+    let delegation_metadata = next_account_info(account_info_iter)?;
+    let delegation_program = next_account_info(account_info_iter)?;
+    let validator_account = account_info_iter.next();
+
+    // Optional: client-provided validator or default validator
+    let validator_pubkey: Option<Pubkey> = validator_account.map(|acc_info| acc_info.key.clone());
+
+    // Prepare counter pda seeds
+    let seed_1 = b"counter";
+    let seed_2 = initializer.key.as_ref();
+    let pda_seeds: &[&[u8]] = &[seed_1, seed_2];
+
+    let delegate_accounts = DelegateAccounts {
+        payer: initializer,
+        pda: pda_to_delegate,
+        owner_program,
+        buffer: delegation_buffer,
+        delegation_record,
+        delegation_metadata,
+        delegation_program,
+        system_program,
+    };
+
+    let delegate_config = DelegateConfig {
+        validator: validator_pubkey, // Set delegating ER validator
+        ..Default::default()
+    };
+
+    delegate_account(delegate_accounts, pda_seeds, delegate_config)?;
+
+    Ok(())
+}
+```
+
+<Info>
+Without Anchor macros, you must manually retrieve and pass all required accounts for delegation.
+</Info>
+
+### Increment Implementation
+
+The increment function uses Borsh for deserialization and serialization:
+
+```rust
+pub fn process_increase_counter(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    increase_by: u64,
+) -> ProgramResult {
+    let accounts_iter = &mut accounts.iter();
+    let initializer_account = next_account_info(accounts_iter)?;
+    let counter_account = next_account_info(accounts_iter)?;
+
+    // Verify PDA
+    let (counter_pda, _bump_seed) =
+        Pubkey::find_program_address(&[b"counter", initializer_account.key.as_ref()], program_id);
+    if counter_pda != *counter_account.key {
+        return Err(ProgramError::InvalidArgument);
+    }
+
+    // Increment using Borsh deserialization and serialization
+    let mut counter_data = Counter::try_from_slice(&counter_account.data.borrow())?;
+    counter_data.count += increase_by;
+    counter_data.serialize(&mut &mut counter_account.data.borrow_mut()[..])?;
+    msg!("PDA {} count: {}", counter_account.key, counter_data.count);
+
+    Ok(())
+}
+```
+
+### Commit and Undelegate
+
+Committing and undelegating requires manual account handling:
+
+```rust
+use ephemeral_rollups_sdk::ephem::{
+    commit_accounts, commit_and_undelegate_accounts,
+};
+
+pub fn process_commit(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let initializer = next_account_info(account_info_iter)?;
+    let counter_account = next_account_info(account_info_iter)?;
+    let magic_program = next_account_info(account_info_iter)?;
+    let magic_context = next_account_info(account_info_iter)?;
+
+    if !initializer.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    commit_accounts(
+        initializer,
+        vec![counter_account],
+        magic_context,
+        magic_program,
+    )?;
+
+    Ok(())
+}
+
+pub fn process_commit_and_undelegate(
+    _program_id: &Pubkey,
+    accounts: &[AccountInfo],
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let initializer = next_account_info(account_info_iter)?;
+    let counter_account = next_account_info(account_info_iter)?;
+    let magic_program = next_account_info(account_info_iter)?;
+    let magic_context = next_account_info(account_info_iter)?;
+
+    if !initializer.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    commit_and_undelegate_accounts(
+        initializer,
+        vec![counter_account],
+        magic_context,
+        magic_program,
+    )?;
+
+    Ok(())
+}
+```
+
+## TypeScript Client Usage
+
+### Delegate to Ephemeral Rollups
+
+```typescript
+import { 
+  Connection, 
+  DELEGATION_PROGRAM_ID,
+  delegationRecordPdaFromDelegatedAccount,
+  delegationMetadataPdaFromDelegatedAccount,
+  delegateBufferPdaFromDelegatedAccountAndOwnerProgram,
+} from "@magicblock-labs/ephemeral-rollups-kit";
+import * as borsh from "borsh";
+
+const remainingAccounts = connection.clusterUrlHttp.includes("localhost")
+  ? [{
+      address: address("mAGicPQYBMvcYveUZA5F5UNNwyHvfYh5xkLS2Fr1mev"),
+      role: AccountRole.READONLY
+    }]
+  : [];
+
+const accounts = [
+  { address: userPubkey, role: AccountRole.WRITABLE_SIGNER},
+  { address: SYSTEM_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+  { address: counterPda, role: AccountRole.WRITABLE },
+  { address: PROGRAM_ID, role: AccountRole.READONLY },
+  {
+    address: await delegateBufferPdaFromDelegatedAccountAndOwnerProgram(counterPda, PROGRAM_ID),
+    role: AccountRole.WRITABLE
+  },
+  {
+    address: await delegationRecordPdaFromDelegatedAccount(counterPda),
+    role: AccountRole.WRITABLE
+  },
+  {
+    address: await delegationMetadataPdaFromDelegatedAccount(counterPda),
+    role: AccountRole.WRITABLE
+  },
+  { address: DELEGATION_PROGRAM_ID, role: AccountRole.READONLY },
+  ...remainingAccounts,
+];
+
+const serializedInstructionData = Buffer.from(
+  CounterInstruction.Delegate,
+  "hex"
+);
+
+const delegateIx: Instruction = {
+  accounts,
+  programAddress: PROGRAM_ID,
+  data: serializedInstructionData,
+};
+
+const transactionMessage = pipe(
+  createTransactionMessage({ version: 0 }),
+  tx => setTransactionMessageFeePayer(userPubkey, tx),
+  tx => appendTransactionMessageInstructions([delegateIx], tx)
+);
+
+const txHash = await connection.sendAndConfirmTransaction(
+  transactionMessage,
+  [userKeypair],
+  { commitment: "confirmed", skipPreflight: true }
+);
+```
+
+### Execute on Ephemeral Rollups
+
+<CodeGroup>
+```typescript Increment
+const accounts = [
+  { address: userPubkey, role: AccountRole.WRITABLE_SIGNER},
+  { address: counterPda, role: AccountRole.WRITABLE },
+];
+
+const serializedInstructionData = Buffer.concat([
+  Buffer.from(CounterInstruction.IncreaseCounter, "hex"),
+  borsh.serialize(
+    IncreaseCounterPayload.schema,
+    new IncreaseCounterPayload(1)
+  ),
+]);
+
+const increaseCounterIx: Instruction = {
+  accounts,
+  programAddress: PROGRAM_ID,
+  data: serializedInstructionData,
+};
+
+const transactionMessage = pipe(
+  createTransactionMessage({ version: 0 }),
+  tx => setTransactionMessageFeePayer(userPubkey, tx),
+  tx => appendTransactionMessageInstructions([increaseCounterIx], tx)
+);
+
+const txHash = await ephemeralConnection.sendAndConfirmTransaction(
+  transactionMessage,
+  [userKeypair],
+  { commitment: "confirmed", skipPreflight: true }
+);
+```
+
+```typescript Commit
+import { MAGIC_CONTEXT_ID, MAGIC_PROGRAM_ID } from "@magicblock-labs/ephemeral-rollups-kit";
+
+const accounts = [
+  { address: userPubkey, role: AccountRole.WRITABLE_SIGNER},
+  { address: counterPda, role: AccountRole.WRITABLE },
+  { address: address(MAGIC_PROGRAM_ID.toString()), role: AccountRole.READONLY},
+  { address: address(MAGIC_CONTEXT_ID.toString()), role: AccountRole.WRITABLE}
+];
+
+const serializedInstructionData = Buffer.from(
+  CounterInstruction.Commit,
+  "hex"
+);
+
+const commitIx: Instruction = {
+  accounts,
+  programAddress: PROGRAM_ID,
+  data: serializedInstructionData,
+};
+
+const transactionMessage = pipe(
+  createTransactionMessage({ version: 0 }),
+  tx => setTransactionMessageFeePayer(userPubkey, tx),
+  tx => appendTransactionMessageInstructions([commitIx], tx)
+);
+
+const txHash = await ephemeralConnection.sendAndConfirmTransaction(
+  transactionMessage,
+  [userKeypair],
+  { commitment: "confirmed", skipPreflight: true }
+);
+
+// Get the commitment signature on the base layer
+const txCommitSgn = await ephemeralConnection.getCommitmentSignature(txHash);
+```
+
+```typescript Undelegate
+const accounts = [
+  { address: userPubkey, role: AccountRole.WRITABLE_SIGNER},
+  { address: counterPda, role: AccountRole.WRITABLE },
+  { address: address(MAGIC_PROGRAM_ID.toString()), role: AccountRole.READONLY},
+  { address: address(MAGIC_CONTEXT_ID.toString()), role: AccountRole.WRITABLE}
+];
+
+const serializedInstructionData = Buffer.from(
+  CounterInstruction.CommitAndUndelegate,
+  "hex"
+);
+
+const undelegateIx: Instruction = {
+  accounts,
+  programAddress: PROGRAM_ID,
+  data: serializedInstructionData,
+};
+
+const transactionMessage = pipe(
+  createTransactionMessage({ version: 0 }),
+  tx => setTransactionMessageFeePayer(userPubkey, tx),
+  tx => appendTransactionMessageInstructions([undelegateIx], tx)
+);
+
+const txHash = await ephemeralConnection.sendAndConfirmTransaction(
+  transactionMessage,
+  [userKeypair],
+  { commitment: "confirmed", skipPreflight: true }
+);
+```
+</CodeGroup>
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Native Rust" icon="rust">
+    Pure Rust implementation without framework dependencies
+  </Card>
+  
+  <Card title="Borsh Serialization" icon="box">
+    Efficient binary serialization for instruction data and accounts
+  </Card>
+  
+  <Card title="Manual Control" icon="sliders">
+    Full control over account validation and CPI calls
+  </Card>
+  
+  <Card title="Lightweight" icon="feather">
+    Minimal dependencies and smaller program size
+  </Card>
+</CardGroup>
+
+<Warning>
+Native Rust programs require more boilerplate code compared to Anchor, but offer maximum flexibility and control.
+</Warning>
+
+## Source Code
+
+View the complete source code on GitHub:
+
+[rust-counter on GitHub](https://github.com/magicblock-labs/Solana-Unity-Examples/tree/main/rust-counter)

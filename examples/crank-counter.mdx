@@ -1,0 +1,227 @@
+---
+title: "Crank Counter"
+description: "Automated execution with scheduled cranks in Ephemeral Rollups"
+---
+
+# Crank Counter
+
+The Crank Counter example demonstrates how to use MagicBlock's scheduled crank system to automatically execute instructions at specified intervals within Ephemeral Rollups. This advanced pattern enables autonomous program execution without manual intervention.
+
+## What Are Cranks?
+
+Cranks are scheduled tasks that automatically execute specified instructions at regular intervals within an Ephemeral Rollup. This is particularly useful for:
+
+- Automated game state updates
+- Periodic reward distributions
+- Scheduled maintenance operations
+- Time-based game mechanics
+
+<Info>
+Cranks execute entirely within the Ephemeral Rollup environment, providing low-latency automated execution without base layer transaction costs.
+</Info>
+
+## How It Works
+
+<Steps>
+
+### Initialize Your Counter
+
+First, create a standard counter program that can be incremented:
+
+```rust programs/crank-counter/src/lib.rs
+pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+    let counter = &mut ctx.accounts.counter;
+    counter.count = 0;
+    msg!("PDA {} count: {}", counter.key(), counter.count);
+    Ok()
+}
+
+pub fn increment(ctx: Context<Increment>) -> Result<()> {
+    let counter = &mut ctx.accounts.counter;
+    counter.count += 1;
+    if counter.count > 1000 {
+        counter.count = 0;
+    }
+    msg!("PDA {} count: {}", counter.key(), counter.count);
+    Ok()
+}
+```
+
+### Schedule the Crank
+
+The `schedule_increment` function creates a scheduled task that automatically calls the increment instruction:
+
+```rust programs/crank-counter/src/lib.rs
+pub fn schedule_increment(
+    ctx: Context<ScheduleIncrement>,
+    args: ScheduleIncrementArgs,
+) -> Result<()> {
+    let increment_ix = Instruction {
+        program_id: crate::ID,
+        accounts: vec![AccountMeta::new(ctx.accounts.counter.key(), false)],
+        data: anchor_lang::InstructionData::data(&crate::instruction::Increment {}),
+    };
+
+    let ix_data = bincode::serialize(&MagicBlockInstruction::ScheduleTask(ScheduleTaskArgs {
+        task_id: args.task_id,
+        execution_interval_millis: args.execution_interval_millis,
+        iterations: args.iterations,
+        instructions: vec![increment_ix],
+    }))
+    .map_err(|err| {
+        msg!("ERROR: failed to serialize args {:?}", err);
+        ProgramError::InvalidArgument
+    })?;
+
+    let schedule_ix = Instruction::new_with_bytes(
+        MAGIC_PROGRAM_ID,
+        &ix_data,
+        vec![
+            AccountMeta::new(ctx.accounts.payer.key(), true),
+            AccountMeta::new(ctx.accounts.counter.key(), false),
+        ],
+    );
+
+    invoke_signed(
+        &schedule_ix,
+        &[
+            ctx.accounts.payer.to_account_info(),
+            ctx.accounts.counter.to_account_info(),
+        ],
+        &[],
+    )?;
+
+    Ok()
+}
+```
+
+### Invoke the Crank from TypeScript
+
+Schedule the crank with specific parameters:
+
+```typescript tests/crank-counter.ts
+let tx = await program.methods
+  .scheduleIncrement({
+    taskId: new BN(1), // Task ID can be arbitrary, used mostly to cancel cranks.
+    executionIntervalMillis: new BN(100), // Milliseconds between executions.
+    iterations: new BN(3), // Number of times to execute the task.
+  })
+  .accounts({
+    magicProgram: MAGIC_PROGRAM_ID,
+    payer: providerEphemeralRollup.wallet.publicKey,
+    program: program.programId,
+  })
+  .transaction();
+
+tx.feePayer = providerEphemeralRollup.wallet.publicKey;
+tx.recentBlockhash = (
+  await providerEphemeralRollup.connection.getLatestBlockhash()
+).blockhash;
+tx = await providerEphemeralRollup.wallet.signTransaction(tx);
+
+const txHash = await providerEphemeralRollup.sendAndConfirm(tx, [], {
+  skipPreflight: true,
+  commitment: "confirmed",
+});
+console.log(`[ER] Schedule Increment txHash: ${txHash}`);
+```
+
+</Steps>
+
+## Crank Parameters
+
+<CodeGroup>
+
+```rust Crank Arguments Structure
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct ScheduleIncrementArgs {
+    pub task_id: u64,                      // Unique identifier for the crank task
+    pub execution_interval_millis: u64,     // Time between executions in milliseconds
+    pub iterations: u64,                    // Number of times to execute (0 = infinite)
+}
+```
+
+</CodeGroup>
+
+<Warning>
+Make sure your delegated account has sufficient commitment interval set to allow the crank to execute multiple times before automatic commits.
+</Warning>
+
+## Program Setup
+
+Your program must be annotated with the `#[ephemeral]` macro:
+
+```rust programs/crank-counter/src/lib.rs
+use ephemeral_rollups_sdk::anchor::{commit, delegate, ephemeral};
+use ephemeral_rollups_sdk::consts::MAGIC_PROGRAM_ID;
+use magicblock_magic_program_api::{args::ScheduleTaskArgs, instruction::MagicBlockInstruction};
+
+#[ephemeral]
+#[program]
+pub mod anchor_counter {
+    use super::*;
+    // ... your program code
+}
+```
+
+## Local Development
+
+<Steps>
+
+### Start Solana Test Validator
+
+Start a Solana test validator with MagicBlock accounts preloaded:
+
+```bash
+mb-test-validator --reset
+```
+
+### Start MagicBlock Validator
+
+Clone and run the [MagicBlock Validator](https://github.com/magicblock-labs/magicblock-validator):
+
+```bash
+RUST_LOG=debug cargo run -- --remote http://localhost:8899 --listen 127.0.0.1:7799
+```
+
+### Set Environment Variables
+
+Configure the environment variables for local development:
+
+```bash
+export EPHEMERAL_PROVIDER_ENDPOINT=http://localhost:7799
+export EPHEMERAL_WS_ENDPOINT=ws://localhost:7800
+export ANCHOR_WALLET="${HOME}/.config/solana/id.json"
+export ANCHOR_PROVIDER_URL="http://127.0.0.1:8899"
+```
+
+### Deploy and Test
+
+Build and deploy the program:
+
+```bash
+anchor build && anchor deploy --provider.cluster localnet
+```
+
+Run the tests:
+
+```bash
+anchor test --skip-deploy --skip-local-validator --skip-build
+```
+
+</Steps>
+
+## Use Cases
+
+Cranks are particularly powerful for:
+
+- **Gaming**: Auto-advance turn-based games, periodic resource regeneration
+- **DeFi**: Scheduled interest calculations, automated liquidations
+- **NFTs**: Time-based trait updates, dynamic metadata changes
+- **Social**: Periodic content refresh, scheduled notifications
+
+## Next Steps
+
+- Explore [Magic Actions](/examples/magic-actions) for executing base chain handlers on commit
+- Learn about [Session Keys](/examples/session-keys) for gasless transactions
+- Check the [full source code](https://github.com/magicblock-labs/ephemeral-rollups-examples/tree/main/crank-counter)

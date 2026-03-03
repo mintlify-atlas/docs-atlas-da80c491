@@ -1,0 +1,766 @@
+---
+title: 'Rust SDK'
+description: 'Complete reference for ephemeral-rollups-sdk Rust crate'
+---
+
+## Overview
+
+The Rust SDK (`ephemeral-rollups-sdk`) provides on-chain program utilities for integrating with MagicBlock Ephemeral Rollups. It includes delegation functions, commit operations, Anchor macros, and CPI helpers.
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+<CodeGroup>
+
+```toml Anchor Programs
+[dependencies]
+ephemeral-rollups-sdk = { version = "0.6.5", features = ["anchor", "disable-realloc"] }
+```
+
+```toml Native Programs
+[dependencies]
+ephemeral-rollups-sdk = "0.6.5"
+```
+
+</CodeGroup>
+
+Or use cargo:
+
+```bash
+cargo add ephemeral-rollups-sdk --features anchor,disable-realloc
+```
+
+## Features
+
+<ParamField path="anchor" type="feature">
+  Enables Anchor framework integration with macros and helpers
+</ParamField>
+
+<ParamField path="disable-realloc" type="feature">
+  Disables automatic account reallocation during delegation (recommended for production)
+</ParamField>
+
+## Anchor Integration
+
+### Imports
+
+```rust
+use ephemeral_rollups_sdk::anchor::{commit, delegate, ephemeral};
+use ephemeral_rollups_sdk::cpi::DelegateConfig;
+use ephemeral_rollups_sdk::ephem::{commit_accounts, commit_and_undelegate_accounts};
+```
+
+### Macros
+
+#### #[ephemeral]
+
+Marks a program module as ephemeral-enabled, allowing it to run on both Solana and Ephemeral Rollups.
+
+```rust
+use anchor_lang::prelude::*;
+use ephemeral_rollups_sdk::anchor::ephemeral;
+
+declare_id!("9RPwaXayVZHna1BYuRS4cLPJZuNGU1uS5V3heXB7v6Qi");
+
+#[ephemeral]
+#[program]
+pub mod anchor_counter {
+    use super::*;
+
+    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+        let counter = &mut ctx.accounts.counter;
+        counter.count = 0;
+        Ok(())
+    }
+
+    pub fn increment(ctx: Context<Increment>) -> Result<()> {
+        let counter = &mut ctx.accounts.counter;
+        counter.count += 1;
+        Ok(())
+    }
+}
+```
+
+<ParamField path="#[ephemeral]" type="macro">
+  Apply to `#[program]` modules to enable Ephemeral Rollups compatibility
+</ParamField>
+
+#### #[delegate]
+
+Adds delegation functionality to an Anchor account context struct.
+
+```rust
+use ephemeral_rollups_sdk::anchor::delegate;
+
+#[delegate]
+#[derive(Accounts)]
+pub struct DelegateInput<'info> {
+    pub payer: Signer<'info>,
+    /// CHECK The pda to delegate
+    #[account(mut, del)]
+    pub pda: AccountInfo<'info>,
+}
+```
+
+This macro generates a `delegate_pda` method on the context:
+
+```rust
+pub fn delegate(ctx: Context<DelegateInput>) -> Result<()> {
+    ctx.accounts.delegate_pda(
+        &ctx.accounts.payer,
+        &[COUNTER_SEED],
+        DelegateConfig {
+            validator: ctx.remaining_accounts.first().map(|acc| acc.key()),
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+```
+
+<ParamField path="#[delegate]" type="macro">
+  Apply to Anchor `Accounts` structs containing accounts to delegate. Mark delegated accounts with `#[account(mut, del)]`
+</ParamField>
+
+#### #[commit]
+
+Adds commit functionality to an Anchor account context struct.
+
+```rust
+use ephemeral_rollups_sdk::anchor::commit;
+
+#[commit]
+#[derive(Accounts)]
+pub struct IncrementAndCommit<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(mut, seeds = [COUNTER_SEED], bump)]
+    pub counter: Account<'info, Counter>,
+}
+```
+
+This automatically includes the required `magic_program` and `magic_context` accounts:
+
+```rust
+pub fn commit(ctx: Context<IncrementAndCommit>) -> Result<()> {
+    commit_accounts(
+        &ctx.accounts.payer,
+        vec![&ctx.accounts.counter.to_account_info()],
+        &ctx.accounts.magic_context,
+        &ctx.accounts.magic_program,
+    )?;
+    Ok(())
+}
+```
+
+<ParamField path="#[commit]" type="macro">
+  Apply to Anchor `Accounts` structs to automatically include magic program and context accounts required for commits
+</ParamField>
+
+## CPI Functions (Native Programs)
+
+### delegate_account
+
+Delegates an account to the Ephemeral Rollups delegation program via CPI.
+
+```rust
+use ephemeral_rollups_sdk::cpi::{
+    delegate_account, DelegateAccounts, DelegateConfig
+};
+use solana_program::{
+    account_info::{next_account_info, AccountInfo},
+    entrypoint::ProgramResult,
+    pubkey::Pubkey,
+};
+
+pub fn process_delegate(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let payer = next_account_info(account_info_iter)?;
+    let system_program = next_account_info(account_info_iter)?;
+    let pda_to_delegate = next_account_info(account_info_iter)?;
+    let owner_program = next_account_info(account_info_iter)?;
+    let delegation_buffer = next_account_info(account_info_iter)?;
+    let delegation_record = next_account_info(account_info_iter)?;
+    let delegation_metadata = next_account_info(account_info_iter)?;
+    let delegation_program = next_account_info(account_info_iter)?;
+    let validator_account = account_info_iter.next();
+
+    let validator_pubkey: Option<Pubkey> = 
+        validator_account.map(|acc_info| acc_info.key.clone());
+
+    // Prepare PDA seeds
+    let seed_1 = b"counter";
+    let seed_2 = payer.key.as_ref();
+    let pda_seeds: &[&[u8]] = &[seed_1, seed_2];
+
+    let delegate_accounts = DelegateAccounts {
+        payer,
+        pda: pda_to_delegate,
+        owner_program,
+        buffer: delegation_buffer,
+        delegation_record,
+        delegation_metadata,
+        delegation_program,
+        system_program,
+    };
+
+    let delegate_config = DelegateConfig {
+        validator: validator_pubkey,
+        ..Default::default()
+    };
+
+    delegate_account(delegate_accounts, pda_seeds, delegate_config)?;
+
+    Ok(())
+}
+```
+
+<ParamField path="accounts" type="DelegateAccounts" required>
+  Struct containing all required account infos for delegation
+</ParamField>
+
+<ParamField path="pda_seeds" type="&[&[u8]]" required>
+  The seeds used to derive the PDA being delegated
+</ParamField>
+
+<ParamField path="config" type="DelegateConfig" required>
+  Configuration for the delegation operation
+</ParamField>
+
+### DelegateAccounts
+
+Struct containing all accounts required for delegation.
+
+```rust
+pub struct DelegateAccounts<'a, 'info> {
+    pub payer: &'a AccountInfo<'info>,
+    pub pda: &'a AccountInfo<'info>,
+    pub owner_program: &'a AccountInfo<'info>,
+    pub buffer: &'a AccountInfo<'info>,
+    pub delegation_record: &'a AccountInfo<'info>,
+    pub delegation_metadata: &'a AccountInfo<'info>,
+    pub delegation_program: &'a AccountInfo<'info>,
+    pub system_program: &'a AccountInfo<'info>,
+}
+```
+
+<ParamField path="payer" type="&AccountInfo" required>
+  The account paying for delegation costs (rent, fees)
+</ParamField>
+
+<ParamField path="pda" type="&AccountInfo" required>
+  The PDA account being delegated to the Ephemeral Rollup
+</ParamField>
+
+<ParamField path="owner_program" type="&AccountInfo" required>
+  The program that owns the PDA being delegated
+</ParamField>
+
+<ParamField path="buffer" type="&AccountInfo" required>
+  The delegation buffer PDA (stores delegated account data)
+</ParamField>
+
+<ParamField path="delegation_record" type="&AccountInfo" required>
+  The delegation record PDA (tracks delegation state)
+</ParamField>
+
+<ParamField path="delegation_metadata" type="&AccountInfo" required>
+  The delegation metadata PDA (additional delegation info)
+</ParamField>
+
+<ParamField path="delegation_program" type="&AccountInfo" required>
+  The delegation program account
+</ParamField>
+
+<ParamField path="system_program" type="&AccountInfo" required>
+  The Solana system program
+</ParamField>
+
+### DelegateConfig
+
+Configuration struct for delegation operations.
+
+```rust
+pub struct DelegateConfig {
+    pub validator: Option<Pubkey>,
+    pub commit_frequency_ms: Option<u32>,
+}
+
+impl Default for DelegateConfig {
+    fn default() -> Self {
+        Self {
+            validator: None,
+            commit_frequency_ms: None,
+        }
+    }
+}
+```
+
+<ParamField path="validator" type="Option<Pubkey>">
+  Optional specific validator to delegate to. If `None`, uses the default ER validator
+</ParamField>
+
+<ParamField path="commit_frequency_ms" type="Option<u32>">
+  Optional commit frequency in milliseconds. If `None`, uses default frequency
+</ParamField>
+
+**Example with custom validator:**
+
+```rust
+let delegate_config = DelegateConfig {
+    validator: Some(Pubkey::from_str("mAGicPQYBMvcYveUZA5F5UNNwyHvfYh5xkLS2Fr1mev").unwrap()),
+    ..Default::default()
+};
+```
+
+**Example with remaining accounts (Anchor):**
+
+```rust
+pub fn delegate(ctx: Context<DelegateInput>) -> Result<()> {
+    ctx.accounts.delegate_pda(
+        &ctx.accounts.payer,
+        &[COUNTER_SEED],
+        DelegateConfig {
+            // Use first remaining account as validator if provided
+            validator: ctx.remaining_accounts.first().map(|acc| acc.key()),
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+```
+
+### undelegate_account
+
+Undelegates an account from the Ephemeral Rollups delegation program via CPI.
+
+```rust
+use ephemeral_rollups_sdk::cpi::undelegate_account;
+
+pub fn process_undelegate(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    pda_seeds: Vec<Vec<u8>>,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let delegated_pda = next_account_info(account_info_iter)?;
+    let delegation_buffer = next_account_info(account_info_iter)?;
+    let payer = next_account_info(account_info_iter)?;
+    let system_program = next_account_info(account_info_iter)?;
+
+    undelegate_account(
+        delegated_pda,
+        program_id,
+        delegation_buffer,
+        payer,
+        system_program,
+        pda_seeds,
+    )?;
+
+    Ok(())
+}
+```
+
+<ParamField path="delegated_pda" type="&AccountInfo" required>
+  The PDA account to undelegate
+</ParamField>
+
+<ParamField path="owner_program" type="&Pubkey" required>
+  The program that owns the delegated PDA
+</ParamField>
+
+<ParamField path="buffer" type="&AccountInfo" required>
+  The delegation buffer account
+</ParamField>
+
+<ParamField path="payer" type="&AccountInfo" required>
+  The account paying for undelegation
+</ParamField>
+
+<ParamField path="system_program" type="&AccountInfo" required>
+  The Solana system program
+</ParamField>
+
+<ParamField path="pda_seeds" type="Vec<Vec<u8>>" required>
+  The seeds used to derive the PDA
+</ParamField>
+
+## Commit Functions
+
+### commit_accounts
+
+Commits account state from Ephemeral Rollup back to Solana base layer.
+
+```rust
+use ephemeral_rollups_sdk::ephem::commit_accounts;
+
+pub fn process_commit(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let payer = next_account_info(account_info_iter)?;
+    let counter_account = next_account_info(account_info_iter)?;
+    let magic_program = next_account_info(account_info_iter)?;
+    let magic_context = next_account_info(account_info_iter)?;
+
+    if !payer.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    commit_accounts(
+        payer,
+        vec![counter_account],
+        magic_context,
+        magic_program,
+    )?;
+
+    Ok(())
+}
+```
+
+<ParamField path="payer" type="&AccountInfo" required>
+  The account paying for the commit operation
+</ParamField>
+
+<ParamField path="accounts" type="Vec<&AccountInfo>" required>
+  Vector of accounts to commit back to base layer
+</ParamField>
+
+<ParamField path="magic_context" type="&AccountInfo" required>
+  The magic context account (required for commits)
+</ParamField>
+
+<ParamField path="magic_program" type="&AccountInfo" required>
+  The magic program account (required for commits)
+</ParamField>
+
+**Anchor example:**
+
+```rust
+pub fn commit(ctx: Context<IncrementAndCommit>) -> Result<()> {
+    commit_accounts(
+        &ctx.accounts.payer,
+        vec![&ctx.accounts.counter.to_account_info()],
+        &ctx.accounts.magic_context,
+        &ctx.accounts.magic_program,
+    )?;
+    Ok(())
+}
+```
+
+### commit_and_undelegate_accounts
+
+Commits account state and undelegates in a single operation.
+
+```rust
+use ephemeral_rollups_sdk::ephem::commit_and_undelegate_accounts;
+
+pub fn process_commit_and_undelegate(
+    _program_id: &Pubkey,
+    accounts: &[AccountInfo],
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let payer = next_account_info(account_info_iter)?;
+    let counter_account = next_account_info(account_info_iter)?;
+    let magic_program = next_account_info(account_info_iter)?;
+    let magic_context = next_account_info(account_info_iter)?;
+
+    if !payer.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    commit_and_undelegate_accounts(
+        payer,
+        vec![counter_account],
+        magic_context,
+        magic_program,
+    )?;
+
+    Ok(())
+}
+```
+
+<ParamField path="payer" type="&AccountInfo" required>
+  The account paying for the operation
+</ParamField>
+
+<ParamField path="accounts" type="Vec<&AccountInfo>" required>
+  Vector of accounts to commit and undelegate
+</ParamField>
+
+<ParamField path="magic_context" type="&AccountInfo" required>
+  The magic context account
+</ParamField>
+
+<ParamField path="magic_program" type="&AccountInfo" required>
+  The magic program account
+</ParamField>
+
+**Anchor example:**
+
+```rust
+pub fn undelegate(ctx: Context<IncrementAndCommit>) -> Result<()> {
+    commit_and_undelegate_accounts(
+        &ctx.accounts.payer,
+        vec![&ctx.accounts.counter.to_account_info()],
+        &ctx.accounts.magic_context,
+        &ctx.accounts.magic_program,
+    )?;
+    Ok(())
+}
+```
+
+**With Anchor account serialization:**
+
+```rust
+pub fn increment_and_undelegate(ctx: Context<IncrementAndCommit>) -> Result<()> {
+    let counter = &mut ctx.accounts.counter;
+    counter.count += 1;
+    msg!("PDA {} count: {}", counter.key(), counter.count);
+    
+    // Serialize the Anchor counter account before committing
+    counter.exit(&crate::ID)?;
+    
+    commit_and_undelegate_accounts(
+        &ctx.accounts.payer,
+        vec![&ctx.accounts.counter.to_account_info()],
+        &ctx.accounts.magic_context,
+        &ctx.accounts.magic_program,
+    )?;
+    Ok(())
+}
+```
+
+## Complete Examples
+
+### Anchor Program with Delegation
+
+```rust
+use anchor_lang::prelude::*;
+use ephemeral_rollups_sdk::anchor::{commit, delegate, ephemeral};
+use ephemeral_rollups_sdk::cpi::DelegateConfig;
+use ephemeral_rollups_sdk::ephem::{commit_accounts, commit_and_undelegate_accounts};
+
+declare_id!("9RPwaXayVZHna1BYuRS4cLPJZuNGU1uS5V3heXB7v6Qi");
+
+pub const COUNTER_SEED: &[u8] = b"counter";
+
+#[ephemeral]
+#[program]
+pub mod anchor_counter {
+    use super::*;
+
+    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+        let counter = &mut ctx.accounts.counter;
+        counter.count = 0;
+        msg!("PDA {} count: {}", counter.key(), counter.count);
+        Ok(())
+    }
+
+    pub fn increment(ctx: Context<Increment>) -> Result<()> {
+        let counter = &mut ctx.accounts.counter;
+        counter.count += 1;
+        msg!("PDA {} count: {}", counter.key(), counter.count);
+        Ok(())
+    }
+
+    pub fn delegate(ctx: Context<DelegateInput>) -> Result<()> {
+        ctx.accounts.delegate_pda(
+            &ctx.accounts.payer,
+            &[COUNTER_SEED],
+            DelegateConfig {
+                validator: ctx.remaining_accounts.first().map(|acc| acc.key()),
+                ..Default::default()
+            },
+        )?;
+        Ok(())
+    }
+
+    pub fn commit(ctx: Context<IncrementAndCommit>) -> Result<()> {
+        commit_accounts(
+            &ctx.accounts.payer,
+            vec![&ctx.accounts.counter.to_account_info()],
+            &ctx.accounts.magic_context,
+            &ctx.accounts.magic_program,
+        )?;
+        Ok(())
+    }
+
+    pub fn undelegate(ctx: Context<IncrementAndCommit>) -> Result<()> {
+        commit_and_undelegate_accounts(
+            &ctx.accounts.payer,
+            vec![&ctx.accounts.counter.to_account_info()],
+            &ctx.accounts.magic_context,
+            &ctx.accounts.magic_program,
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct Initialize<'info> {
+    #[account(init_if_needed, payer = user, space = 8 + 8, seeds = [COUNTER_SEED], bump)]
+    pub counter: Account<'info, Counter>,
+    #[account(mut)]
+    pub user: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[delegate]
+#[derive(Accounts)]
+pub struct DelegateInput<'info> {
+    pub payer: Signer<'info>,
+    /// CHECK The pda to delegate
+    #[account(mut, del)]
+    pub pda: AccountInfo<'info>,
+}
+
+#[derive(Accounts)]
+pub struct Increment<'info> {
+    #[account(mut, seeds = [COUNTER_SEED], bump)]
+    pub counter: Account<'info, Counter>,
+}
+
+#[commit]
+#[derive(Accounts)]
+pub struct IncrementAndCommit<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(mut, seeds = [COUNTER_SEED], bump)]
+    pub counter: Account<'info, Counter>,
+}
+
+#[account]
+pub struct Counter {
+    pub count: u64,
+}
+```
+
+### Native Program with CPI
+
+```rust
+use borsh::{BorshDeserialize, BorshSerialize};
+use solana_program::{
+    account_info::{next_account_info, AccountInfo},
+    entrypoint::ProgramResult,
+    pubkey::Pubkey,
+};
+use ephemeral_rollups_sdk::cpi::{
+    delegate_account, DelegateAccounts, DelegateConfig,
+};
+use ephemeral_rollups_sdk::ephem::{commit_accounts, commit_and_undelegate_accounts};
+
+pub fn process_instruction(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    instruction_data: &[u8],
+) -> ProgramResult {
+    match instruction_data[0] {
+        0 => process_initialize(program_id, accounts),
+        1 => process_increment(program_id, accounts),
+        2 => process_delegate(program_id, accounts),
+        3 => process_commit(program_id, accounts),
+        4 => process_commit_and_undelegate(program_id, accounts),
+        _ => Err(ProgramError::InvalidInstructionData),
+    }
+}
+
+pub fn process_delegate(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let payer = next_account_info(account_info_iter)?;
+    let system_program = next_account_info(account_info_iter)?;
+    let pda_to_delegate = next_account_info(account_info_iter)?;
+    let owner_program = next_account_info(account_info_iter)?;
+    let delegation_buffer = next_account_info(account_info_iter)?;
+    let delegation_record = next_account_info(account_info_iter)?;
+    let delegation_metadata = next_account_info(account_info_iter)?;
+    let delegation_program = next_account_info(account_info_iter)?;
+
+    let seed_1 = b"counter";
+    let seed_2 = payer.key.as_ref();
+    let pda_seeds: &[&[u8]] = &[seed_1, seed_2];
+
+    let delegate_accounts = DelegateAccounts {
+        payer,
+        pda: pda_to_delegate,
+        owner_program,
+        buffer: delegation_buffer,
+        delegation_record,
+        delegation_metadata,
+        delegation_program,
+        system_program,
+    };
+
+    delegate_account(delegate_accounts, pda_seeds, DelegateConfig::default())?;
+    Ok(())
+}
+
+pub fn process_commit(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let payer = next_account_info(account_info_iter)?;
+    let counter_account = next_account_info(account_info_iter)?;
+    let magic_program = next_account_info(account_info_iter)?;
+    let magic_context = next_account_info(account_info_iter)?;
+
+    commit_accounts(
+        payer,
+        vec![counter_account],
+        magic_context,
+        magic_program,
+    )?;
+    Ok(())
+}
+```
+
+## VRF Integration
+
+For programs using verifiable random functions with Ephemeral Rollups:
+
+```rust
+use ephemeral_vrf_sdk::anchor::vrf;
+use ephemeral_vrf_sdk::instructions::{create_request_randomness_ix, RequestRandomnessParams};
+use ephemeral_vrf_sdk::types::SerializableAccountMeta;
+
+#[vrf]
+#[derive(Accounts)]
+pub struct DoRollDiceDelegatedCtx<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(seeds = [PLAYER_SEED, payer.key().to_bytes().as_slice()], bump)]
+    pub player: Account<'info, Player>,
+    /// CHECK: The oracle queue
+    #[account(mut, address = ephemeral_vrf_sdk::consts::DEFAULT_EPHEMERAL_QUEUE)]
+    pub oracle_queue: AccountInfo<'info>,
+}
+
+pub fn roll_dice_delegated(ctx: Context<DoRollDiceDelegatedCtx>, client_seed: u8) -> Result<()> {
+    let ix = create_request_randomness_ix(RequestRandomnessParams {
+        payer: ctx.accounts.payer.key(),
+        oracle_queue: ctx.accounts.oracle_queue.key(),
+        callback_program_id: ID,
+        callback_discriminator: instruction::CallbackRollDice::DISCRIMINATOR.to_vec(),
+        caller_seed: [client_seed; 32],
+        accounts_metas: Some(vec![SerializableAccountMeta {
+            pubkey: ctx.accounts.player.key(),
+            is_signer: false,
+            is_writable: true,
+        }]),
+        ..Default::default()
+    });
+    ctx.accounts.invoke_signed_vrf(&ctx.accounts.payer.to_account_info(), &ix)?;
+    Ok(())
+}
+```
+
+## Version Compatibility
+
+- **SDK Version**: 0.6.5
+- **Anchor**: 0.32.1+ (when using anchor feature)
+- **Solana**: 1.18+
+
+## Best Practices
+
+1. **Always use `disable-realloc` feature in production** to prevent unexpected account size changes
+2. **Serialize Anchor accounts before committing** using `.exit()` method
+3. **Include validator in remaining_accounts for localnet** testing
+4. **Use `#[ephemeral]` macro on all program modules** that need ER support
+5. **Call commit operations only from ER**, not from base layer

@@ -1,0 +1,527 @@
+---
+title: Pinocchio Counter
+description: Lightweight counter program using Pinocchio framework without Borsh serialization
+---
+
+A lightweight counter program using the Pinocchio framework with Ephemeral Rollups. This example demonstrates a more efficient alternative to Borsh serialization, using manual serialization with fixed-size types for reduced compute and size overhead.
+
+## What You'll Learn
+
+- How to use Pinocchio for lightweight Solana programs
+- How to implement manual serialization without Borsh
+- How to delegate accounts using the Pinocchio SDK
+- How to work with fixed-size arrays and primitives
+- How to minimize program size and compute units
+
+## Program Structure
+
+The Pinocchio counter program includes the following instructions:
+
+- **0: InitializeCounter** - Initialize a counter PDA to 0 (payload: `bump` u8)
+- **1: IncreaseCounter** - Increase counter by specified amount (payload: `bump` u8 + `increase_by` u64)
+- **2: Delegate** - Delegate the counter to Ephemeral Rollups (payload: `bump` u8)
+- **3: CommitAndUndelegate** - Commit and undelegate the counter
+- **4: Commit** - Commit changes to base layer
+- **5: IncrementAndCommit** - Increment and commit in one instruction (payload: `bump` u8 + `increase_by` u64)
+- **6: IncrementAndUndelegate** - Increment and undelegate in one instruction (payload: `bump` u8 + `increase_by` u64)
+
+## Software Requirements
+
+| Software | Version | Installation Guide |
+| -------- | ------- | ------------------- |
+| **Solana** | 2.3.13 | [Install Solana](https://docs.anza.xyz/cli/install) |
+| **Rust** | 1.85.0 | [Install Rust](https://www.rust-lang.org/tools/install) |
+| **Node** | 24.10.0 | [Install Node](https://nodejs.org/en/download/current) |
+
+## Build and Test
+
+<Steps>
+  <Step title="Build the program">
+    ```bash
+    cargo build-sbf
+    ```
+  </Step>
+
+  <Step title="Run tests">
+    Run tests with logging enabled:
+    
+    ```bash
+    cargo test-sbf --features logging
+    ```
+  </Step>
+</Steps>
+
+## Key Differences from Rust Counter
+
+<CardGroup cols={2}>
+  <Card title="No Borsh" icon="ban">
+    Uses manual serialization with `to_le_bytes()` and `from_le_bytes()` for simplicity
+  </Card>
+  
+  <Card title="No Vec" icon="list">
+    All types use fixed-size arrays or primitives
+  </Card>
+  
+  <Card title="Pinocchio Framework" icon="feather">
+    Leverages Pinocchio's lightweight instruction handling
+  </Card>
+  
+  <Card title="Direct State Management" icon="database">
+    Simple `Counter` struct with manual memory management
+  </Card>
+</CardGroup>
+
+## Program Implementation
+
+### State Definition
+
+The counter state is a simple struct with manual serialization:
+
+```rust
+use pinocchio::error::ProgramError;
+
+#[repr(C)]
+pub struct Counter {
+    pub count: u64,
+}
+
+impl Counter {
+    pub const SIZE: usize = 8;
+
+    pub fn load_mut(data: &mut [u8]) -> Result<&mut Self, ProgramError> {
+        if data.len() < Self::SIZE {
+            return Err(ProgramError::InvalidArgument);
+        }
+        let ptr = data.as_mut_ptr() as *mut Self;
+        // Verify alignment
+        if (ptr as usize) % core::mem::align_of::<Self>() != 0 {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        // Safety: caller ensures the account data is valid for Counter.
+        Ok(unsafe { &mut *ptr })
+    }
+}
+```
+
+<Info>
+Using `#[repr(C)]` ensures the struct has a predictable memory layout, allowing direct pointer casting.
+</Info>
+
+### Initialize Counter
+
+```rust
+use pinocchio::{AccountView, Address, ProgramResult};
+use pinocchio_system::instructions::CreateAccount;
+use pinocchio::cpi::{Seed, Signer};
+
+pub fn process_initialize_counter(
+    program_id: &Address,
+    accounts: &[AccountView],
+    bump: u8,
+) -> ProgramResult {
+    let [initializer_account, counter_account, _system_program] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+
+    let bump_seed = [bump];
+    let counter_pda = counter_address_from_bump(program_id, initializer_account, bump)?;
+
+    if counter_pda != *counter_account.address() {
+        return Err(ProgramError::InvalidArgument);
+    }
+
+    // Create counter account if it doesn't exist.
+    if counter_account.lamports() == 0 {
+        let rent_exempt_lamports = 1_000_000;
+
+        let create_account_ix = CreateAccount {
+            from: initializer_account,
+            to: counter_account,
+            lamports: rent_exempt_lamports,
+            space: Counter::SIZE as u64,
+            owner: program_id,
+        };
+
+        let seed_array: [Seed; 3] = [
+            Seed::from(b"counter"),
+            Seed::from(initializer_account.address().as_ref()),
+            Seed::from(&bump_seed),
+        ];
+        let signer = Signer::from(&seed_array);
+        create_account_ix.invoke_signed(&[signer])?;
+    }
+
+    // Initialize counter to 0.
+    let mut data = counter_account.try_borrow_mut()?;
+    let counter_data = Counter::load_mut(&mut data)?;
+    counter_data.count = 0;
+
+    Ok(())
+}
+```
+
+### Increment Counter
+
+```rust
+pub fn process_increase_counter(
+    program_id: &Address,
+    accounts: &[AccountView],
+    bump: u8,
+    increase_by: u64,
+) -> ProgramResult {
+    let [initializer_account, counter_account] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+
+    let counter_pda = counter_address_from_bump(program_id, initializer_account, bump)?;
+
+    if counter_pda != *counter_account.address() {
+        return Err(ProgramError::InvalidArgument);
+    }
+
+    let mut data = counter_account.try_borrow_mut()?;
+    let counter_data = Counter::load_mut(&mut data)?;
+    counter_data.count = counter_data
+        .count
+        .checked_add(increase_by)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+
+    Ok(())
+}
+```
+
+<Note>
+Pinocchio uses `AccountView` instead of `AccountInfo`, providing a more lightweight abstraction.
+</Note>
+
+### Delegation Implementation
+
+```rust
+use ephemeral_rollups_pinocchio::instruction::delegate_account;
+use ephemeral_rollups_pinocchio::types::DelegateConfig;
+
+pub fn process_delegate(
+    _program_id: &Address,
+    accounts: &[AccountView],
+    bump: u8,
+) -> ProgramResult {
+    let [initializer, pda_to_delegate, owner_program, delegation_buffer, delegation_record, delegation_metadata, _delegation_program, system_program, rest @ ..] =
+        accounts
+    else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    let validator = rest.first().map(|account| *account.address());
+
+    let seed_1 = b"counter";
+    let seed_2 = initializer.address().as_ref();
+    let seeds: &[&[u8]] = &[seed_1, seed_2];
+    let counter_pda = counter_address_from_bump(owner_program.address(), initializer, bump)?;
+
+    let delegate_config = DelegateConfig {
+        validator,
+        ..Default::default()
+    };
+
+    if counter_pda != *pda_to_delegate.address() {
+        return Err(ProgramError::InvalidArgument);
+    }
+
+    delegate_account(
+        &[
+            initializer,
+            pda_to_delegate,
+            owner_program,
+            delegation_buffer,
+            delegation_record,
+            delegation_metadata,
+            system_program,
+        ],
+        seeds,
+        bump,
+        delegate_config,
+    )?;
+
+    Ok(())
+}
+```
+
+### Commit and Undelegate
+
+```rust
+use ephemeral_rollups_pinocchio::instruction::{
+    commit_accounts, commit_and_undelegate_accounts,
+};
+
+pub fn process_commit(_program_id: &Address, accounts: &[AccountView]) -> ProgramResult {
+    let [initializer, counter_account, magic_program, magic_context] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+
+    if !initializer.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    commit_accounts(
+        initializer,
+        &[*counter_account],
+        magic_context,
+        magic_program,
+    )?;
+
+    Ok(())
+}
+
+pub fn process_commit_and_undelegate(
+    _program_id: &Address,
+    accounts: &[AccountView],
+) -> ProgramResult {
+    let [initializer, counter_account, magic_program, magic_context] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+
+    if !initializer.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    commit_and_undelegate_accounts(
+        initializer,
+        &[*counter_account],
+        magic_context,
+        magic_program,
+    )?;
+
+    Ok(())
+}
+```
+
+## TypeScript Client Usage
+
+### Initialize with Bump
+
+<Note>
+Pinocchio counter requires passing the bump seed in the instruction data.
+</Note>
+
+```typescript
+import { 
+  Connection,
+  getProgramDerivedAddress,
+  getAddressEncoder,
+} from '@solana/kit';
+import * as borsh from "borsh";
+
+const addressEncoder = getAddressEncoder();
+const [counterPda, bump] = await getProgramDerivedAddress({
+  programAddress: PROGRAM_ID,
+  seeds: [
+    Buffer.from("counter"),
+    addressEncoder.encode(userPubkey)
+  ],
+});
+const bumpBytes = Buffer.from([bump]);
+
+const accounts = [
+  { address: userPubkey, role: AccountRole.WRITABLE_SIGNER},
+  { address: counterPda, role: AccountRole.WRITABLE },
+  { address: SYSTEM_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+];
+
+const serializedInstructionData = Buffer.concat([
+  Buffer.from(CounterInstruction.InitializeCounter, "hex"),
+  bumpBytes,
+]);
+
+const initializeIx: Instruction = {
+  accounts,
+  programAddress: PROGRAM_ID,
+  data: serializedInstructionData,
+};
+```
+
+### Delegate to Ephemeral Rollups
+
+```typescript
+import { 
+  DELEGATION_PROGRAM_ID,
+  delegationRecordPdaFromDelegatedAccount,
+  delegationMetadataPdaFromDelegatedAccount,
+  delegateBufferPdaFromDelegatedAccountAndOwnerProgram,
+} from "@magicblock-labs/ephemeral-rollups-kit";
+
+const remainingAccounts = connection.clusterUrlHttp.includes("localhost")
+  ? [{
+      address: address("mAGicPQYBMvcYveUZA5F5UNNwyHvfYh5xkLS2Fr1mev"),
+      role: AccountRole.READONLY
+    }]
+  : [{
+      address: address("MAS1Dt9qreoRMQ14YQuhg8UTZMMzDdKhmkZMECCzk57"),
+      role: AccountRole.READONLY
+    }];
+
+const accounts = [
+  { address: userPubkey, role: AccountRole.WRITABLE_SIGNER},
+  { address: counterPda, role: AccountRole.WRITABLE },
+  { address: PROGRAM_ID, role: AccountRole.READONLY },
+  {
+    address: await delegateBufferPdaFromDelegatedAccountAndOwnerProgram(counterPda, PROGRAM_ID),
+    role: AccountRole.WRITABLE
+  },
+  {
+    address: await delegationRecordPdaFromDelegatedAccount(counterPda),
+    role: AccountRole.WRITABLE
+  },
+  {
+    address: await delegationMetadataPdaFromDelegatedAccount(counterPda),
+    role: AccountRole.WRITABLE
+  },
+  { address: DELEGATION_PROGRAM_ID, role: AccountRole.READONLY },
+  { address: SYSTEM_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+  ...remainingAccounts,
+];
+
+const serializedInstructionData = Buffer.concat([
+  Buffer.from(CounterInstruction.Delegate, "hex"),
+  bumpBytes,
+]);
+```
+
+### Execute on Ephemeral Rollups
+
+<CodeGroup>
+```typescript Increment
+const accounts = [
+  { address: userPubkey, role: AccountRole.WRITABLE_SIGNER},
+  { address: counterPda, role: AccountRole.WRITABLE },
+];
+
+const serializedInstructionData = Buffer.concat([
+  Buffer.from(CounterInstruction.IncreaseCounter, "hex"),
+  bumpBytes,
+  borsh.serialize(
+    IncreaseCounterPayload.schema,
+    new IncreaseCounterPayload(1)
+  ),
+]);
+
+const increaseCounterIx: Instruction = {
+  accounts,
+  programAddress: PROGRAM_ID,
+  data: serializedInstructionData,
+};
+
+const transactionMessage = pipe(
+  createTransactionMessage({ version: 0 }),
+  tx => setTransactionMessageFeePayer(userPubkey, tx),
+  tx => appendTransactionMessageInstructions([increaseCounterIx], tx)
+);
+
+const txHash = await ephemeralConnection.sendAndConfirmTransaction(
+  transactionMessage,
+  [userKeypair],
+  { commitment: "confirmed", skipPreflight: true }
+);
+```
+
+```typescript Commit
+import { MAGIC_CONTEXT_ID, MAGIC_PROGRAM_ID } from "@magicblock-labs/ephemeral-rollups-kit";
+
+const accounts = [
+  { address: userPubkey, role: AccountRole.WRITABLE_SIGNER},
+  { address: counterPda, role: AccountRole.WRITABLE },
+  { address: address(MAGIC_PROGRAM_ID.toString()), role: AccountRole.READONLY},
+  { address: address(MAGIC_CONTEXT_ID.toString()), role: AccountRole.WRITABLE}
+];
+
+const serializedInstructionData = Buffer.from(
+  CounterInstruction.Commit,
+  "hex"
+);
+
+const commitIx: Instruction = {
+  accounts,
+  programAddress: PROGRAM_ID,
+  data: serializedInstructionData,
+};
+
+const transactionMessage = pipe(
+  createTransactionMessage({ version: 0 }),
+  tx => setTransactionMessageFeePayer(userPubkey, tx),
+  tx => appendTransactionMessageInstructions([commitIx], tx)
+);
+
+const txHash = await ephemeralConnection.sendAndConfirmTransaction(
+  transactionMessage,
+  [userKeypair],
+  { commitment: "confirmed", skipPreflight: true }
+);
+```
+
+```typescript Undelegate
+const accounts = [
+  { address: userPubkey, role: AccountRole.WRITABLE_SIGNER},
+  { address: counterPda, role: AccountRole.WRITABLE },
+  { address: address(MAGIC_PROGRAM_ID.toString()), role: AccountRole.READONLY},
+  { address: address(MAGIC_CONTEXT_ID.toString()), role: AccountRole.WRITABLE}
+];
+
+const serializedInstructionData = Buffer.from(
+  CounterInstruction.CommitAndUndelegate,
+  "hex"
+);
+
+const undelegateIx: Instruction = {
+  accounts,
+  programAddress: PROGRAM_ID,
+  data: serializedInstructionData,
+};
+
+const transactionMessage = pipe(
+  createTransactionMessage({ version: 0 }),
+  tx => setTransactionMessageFeePayer(userPubkey, tx),
+  tx => appendTransactionMessageInstructions([undelegateIx], tx)
+);
+
+const txHash = await ephemeralConnection.sendAndConfirmTransaction(
+  transactionMessage,
+  [userKeypair],
+  { commitment: "confirmed", skipPreflight: true }
+);
+```
+</CodeGroup>
+
+## Performance Benefits
+
+<CardGroup cols={2}>
+  <Card title="Smaller Program Size" icon="compress">
+    No Borsh dependency reduces compiled program size
+  </Card>
+  
+  <Card title="Lower Compute Units" icon="gauge-high">
+    Direct memory access is more efficient than serialization
+  </Card>
+  
+  <Card title="Minimal Dependencies" icon="cube">
+    Pinocchio is lightweight with fewer external crates
+  </Card>
+  
+  <Card title="Fixed Allocations" icon="lock">
+    No Vec types means predictable memory usage
+  </Card>
+</CardGroup>
+
+<Warning>
+Pinocchio requires manual memory management and is more error-prone than frameworks like Anchor. Use it when you need maximum performance and minimal size.
+</Warning>
+
+## Account Structure
+
+The Counter account is simple:
+- **Size**: 8 bytes
+- **Layout**: Single `u64` count value
+- **Serialization**: Direct memory casting (no Borsh)
+
+## Source Code
+
+View the complete source code on GitHub:
+
+[pinocchio-counter on GitHub](https://github.com/magicblock-labs/Solana-Unity-Examples/tree/main/pinocchio-counter)

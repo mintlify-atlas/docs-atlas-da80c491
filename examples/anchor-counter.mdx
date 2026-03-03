@@ -1,0 +1,375 @@
+---
+title: Anchor Counter
+description: Simple counter program using Anchor framework and Ephemeral Rollups with delegation macros
+---
+
+A simple counter program demonstrating how to use the Anchor framework with Ephemeral Rollups. This example shows how to delegate accounts, execute low-latency transactions, and commit state back to the base layer using Anchor's ergonomic macros.
+
+## What You'll Learn
+
+- How to use Anchor's `#[ephemeral]`, `#[delegate]`, and `#[commit]` macros
+- How to delegate a PDA to Ephemeral Rollups
+- How to execute transactions with low latency on delegated accounts
+- How to commit state changes back to Solana
+- How to undelegate accounts from Ephemeral Rollups
+
+## Program Structure
+
+The Anchor counter program includes the following instructions:
+
+- **initialize** - Initialize the counter PDA to 0
+- **increment** - Increment the counter by 1 (with rollover at 1000)
+- **delegate** - Delegate the counter account to the delegation program
+- **commit** - Manually commit the account state to Solana
+- **undelegate** - Commit and undelegate the account
+- **increment_and_commit** - Increment and commit in one transaction
+- **increment_and_undelegate** - Increment and undelegate in one transaction
+
+## Software Requirements
+
+<Note>
+Ensure you have the following software packages installed before building the program.
+</Note>
+
+| Software   | Version | Installation Guide                                              |
+| ---------- | ------- | --------------------------------------------------------------- |
+| **Solana** | 2.3.13  | [Install Solana](https://docs.anza.xyz/cli/install)             |
+| **Rust**   | 1.85.0  | [Install Rust](https://www.rust-lang.org/tools/install)         |
+| **Anchor** | 0.32.1  | [Install Anchor](https://www.anchor-lang.com/docs/installation) |
+| **Node**   | 24.10.0 | [Install Node](https://nodejs.org/en/download/current)          |
+
+```sh
+# Check and initialize your Solana version
+agave-install list
+agave-install init 2.3.13
+
+# Check and initialize your Rust version
+rustup show
+rustup install 1.85.0
+
+# Check and initialize your Anchor version
+avm list
+avm use 0.32.1
+```
+
+## Build and Test
+
+<Steps>
+  <Step title="Install dependencies">
+    ```bash
+    yarn
+    ```
+  </Step>
+
+  <Step title="Run tests (skip build and deploy)">
+    The test script automatically detects the cluster from `Anchor.toml` and handles Ephemeral Rollup setup for localnet:
+    
+    ```bash
+    anchor test --skip-deploy --skip-build --skip-local-validator
+    ```
+  </Step>
+
+  <Step title="Build, deploy and test (optional)">
+    To build, deploy and run tests with a new program:
+    
+    ```bash
+    # Delete keypairs in the deploy folder
+    rm -rf /target/deploy/*.keypair
+    
+    # Build, deploy and test program
+    anchor test
+    ```
+  </Step>
+</Steps>
+
+## Program Implementation
+
+### Delegation Macro
+
+The program uses Anchor's special macros to enable Ephemeral Rollups integration:
+
+```rust
+use anchor_lang::prelude::*;
+use ephemeral_rollups_sdk::anchor::{commit, delegate, ephemeral};
+use ephemeral_rollups_sdk::cpi::DelegateConfig;
+
+#[ephemeral]
+#[program]
+pub mod anchor_counter {
+    use super::*;
+    // ... instructions
+}
+```
+
+<Info>
+The `#[ephemeral]` macro marks the program as compatible with Ephemeral Rollups, enabling special delegation features.
+</Info>
+
+### Delegate Instruction
+
+The delegate instruction uses the `#[delegate]` macro on the context struct:
+
+```rust
+/// Delegate the account to the delegation program
+pub fn delegate(ctx: Context<DelegateInput>) -> Result<()> {
+    ctx.accounts.delegate_pda(
+        &ctx.accounts.payer,
+        &[COUNTER_SEED],
+        DelegateConfig {
+            // Optionally set a specific validator from the first remaining account
+            validator: ctx.remaining_accounts.first().map(|acc| acc.key()),
+            ..Default::default()
+        },
+    )?;
+    Ok()
+}
+
+/// Add delegate function to the context
+#[delegate]
+#[derive(Accounts)]
+pub struct DelegateInput<'info> {
+    pub payer: Signer<'info>,
+    /// CHECK The pda to delegate
+    #[account(mut, del)]
+    pub pda: AccountInfo<'info>,
+}
+```
+
+<Note>
+The `#[delegate]` macro automatically adds the required delegation accounts to the context, and the `#[account(mut, del)]` attribute marks which account to delegate.
+</Note>
+
+### Increment Instruction
+
+The core increment logic is simple:
+
+```rust
+/// Increment the counter.
+pub fn increment(ctx: Context<Increment>) -> Result<()> {
+    let counter = &mut ctx.accounts.counter;
+    counter.count += 1;
+    if counter.count > 1000 {
+        counter.count = 0;
+    }
+    msg!("PDA {} count: {}", counter.key(), counter.count);
+    Ok()
+}
+
+#[derive(Accounts)]
+pub struct Increment<'info> {
+    #[account(mut, seeds = [COUNTER_SEED], bump)]
+    pub counter: Account<'info, Counter>,
+}
+
+#[account]
+pub struct Counter {
+    pub count: u64,
+}
+```
+
+### Commit and Undelegate
+
+The `#[commit]` macro simplifies committing state changes:
+
+```rust
+/// Manual commit the account in the ER.
+pub fn commit(ctx: Context<IncrementAndCommit>) -> Result<()> {
+    commit_accounts(
+        &ctx.accounts.payer,
+        vec![&ctx.accounts.counter.to_account_info()],
+        &ctx.accounts.magic_context,
+        &ctx.accounts.magic_program,
+    )?;
+    Ok()
+}
+
+/// Undelegate the account from the delegation program
+pub fn undelegate(ctx: Context<IncrementAndCommit>) -> Result<()> {
+    commit_and_undelegate_accounts(
+        &ctx.accounts.payer,
+        vec![&ctx.accounts.counter.to_account_info()],
+        &ctx.accounts.magic_context,
+        &ctx.accounts.magic_program,
+    )?;
+    Ok()
+}
+
+/// Account for the increment instruction + manual commit.
+#[commit]
+#[derive(Accounts)]
+pub struct IncrementAndCommit<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(mut, seeds = [COUNTER_SEED], bump)]
+    pub counter: Account<'info, Counter>,
+}
+```
+
+<Info>
+The `#[commit]` macro automatically adds the `magic_program` and `magic_context` accounts required for committing state.
+</Info>
+
+## TypeScript Client Usage
+
+### Initialize and Increment on Solana
+
+```typescript
+import * as anchor from "@coral-xyz/anchor";
+import { Program } from "@coral-xyz/anchor";
+import { AnchorCounter } from "../target/types/anchor_counter";
+
+const provider = anchor.AnchorProvider.env();
+const program = anchor.workspace.AnchorCounter as Program<AnchorCounter>;
+
+const COUNTER_SEED = "counter";
+const [counterPDA] = anchor.web3.PublicKey.findProgramAddressSync(
+  [Buffer.from(COUNTER_SEED)],
+  program.programId
+);
+
+// Initialize counter
+let tx = await program.methods
+  .initialize()
+  .accounts({
+    user: provider.wallet.publicKey,
+  })
+  .transaction();
+
+await provider.sendAndConfirm(tx, [provider.wallet.payer]);
+
+// Increment on Solana
+tx = await program.methods
+  .increment()
+  .accounts({
+    counter: counterPDA,
+  })
+  .transaction();
+
+await provider.sendAndConfirm(tx, [provider.wallet.payer]);
+```
+
+### Delegate to Ephemeral Rollups
+
+```typescript
+// Add local validator identity if running on localnet
+const remainingAccounts = providerEphemeralRollup.connection.rpcEndpoint.includes("localhost")
+  ? [{
+      pubkey: new web3.PublicKey("mAGicPQYBMvcYveUZA5F5UNNwyHvfYh5xkLS2Fr1mev"),
+      isSigner: false,
+      isWritable: false,
+    }]
+  : [];
+
+let tx = await program.methods
+  .delegate()
+  .accounts({
+    payer: provider.wallet.publicKey,
+    pda: counterPDA,
+  })
+  .remainingAccounts(remainingAccounts)
+  .transaction();
+
+await provider.sendAndConfirm(tx, [provider.wallet.payer]);
+```
+
+### Execute on Ephemeral Rollups
+
+<CodeGroup>
+```typescript Increment
+const providerEphemeralRollup = new anchor.AnchorProvider(
+  new anchor.web3.Connection(
+    process.env.EPHEMERAL_PROVIDER_ENDPOINT || "https://devnet-as.magicblock.app/",
+    {
+      wsEndpoint: process.env.EPHEMERAL_WS_ENDPOINT || "wss://devnet-as.magicblock.app/",
+    }
+  ),
+  anchor.Wallet.local()
+);
+
+let tx = await program.methods
+  .increment()
+  .accounts({
+    counter: counterPDA,
+  })
+  .transaction();
+
+tx.feePayer = providerEphemeralRollup.wallet.publicKey;
+tx.recentBlockhash = (
+  await providerEphemeralRollup.connection.getLatestBlockhash()
+).blockhash;
+tx = await providerEphemeralRollup.wallet.signTransaction(tx);
+
+const txHash = await providerEphemeralRollup.sendAndConfirm(tx);
+console.log("Increment Tx:", txHash);
+```
+
+```typescript Commit
+import { GetCommitmentSignature } from "@magicblock-labs/ephemeral-rollups-sdk";
+
+let tx = await program.methods
+  .commit()
+  .accounts({
+    payer: providerEphemeralRollup.wallet.publicKey,
+  })
+  .transaction();
+
+tx.feePayer = providerEphemeralRollup.wallet.publicKey;
+tx.recentBlockhash = (
+  await providerEphemeralRollup.connection.getLatestBlockhash()
+).blockhash;
+tx = await providerEphemeralRollup.wallet.signTransaction(tx);
+
+const txHash = await providerEphemeralRollup.sendAndConfirm(tx);
+
+// Wait for commitment on the base layer
+const txCommitSgn = await GetCommitmentSignature(
+  txHash,
+  providerEphemeralRollup.connection
+);
+console.log("Base Layer Commit Tx:", txCommitSgn);
+```
+
+```typescript Increment and Undelegate
+let tx = await program.methods
+  .incrementAndUndelegate()
+  .accounts({
+    payer: providerEphemeralRollup.wallet.publicKey,
+  })
+  .transaction();
+
+tx.feePayer = provider.wallet.publicKey;
+tx.recentBlockhash = (
+  await providerEphemeralRollup.connection.getLatestBlockhash()
+).blockhash;
+tx = await providerEphemeralRollup.wallet.signTransaction(tx);
+
+const txHash = await providerEphemeralRollup.sendAndConfirm(tx);
+console.log("Increment and Undelegate Tx:", txHash);
+```
+</CodeGroup>
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Ergonomic Macros" icon="wand-magic-sparkles">
+    Use `#[ephemeral]`, `#[delegate]`, and `#[commit]` macros to simplify Ephemeral Rollups integration
+  </Card>
+  
+  <Card title="Automatic Account Injection" icon="bolt">
+    Delegation and commit accounts are automatically added to instruction contexts
+  </Card>
+  
+  <Card title="Type Safety" icon="shield">
+    Anchor's type-safe framework ensures correct account structures and validation
+  </Card>
+  
+  <Card title="Flexible Commits" icon="layer-group">
+    Commit state manually or combine with other operations in a single instruction
+  </Card>
+</CardGroup>
+
+## Source Code
+
+View the complete source code on GitHub:
+
+[anchor-counter on GitHub](https://github.com/magicblock-labs/Solana-Unity-Examples/tree/main/anchor-counter)

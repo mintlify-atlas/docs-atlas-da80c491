@@ -1,0 +1,895 @@
+---
+title: 'Troubleshooting'
+description: 'Common issues and solutions when developing with Ephemeral Rollups'
+---
+
+## Overview
+
+This guide covers common issues you may encounter when developing and testing with MagicBlock Ephemeral Rollups, along with solutions and workarounds.
+
+## Connection Issues
+
+<AccordionGroup>
+
+<Accordion title="Connection refused to localhost:7799 or localhost:8899">
+
+**Problem:** Tests fail with connection errors:
+
+```
+Error: connect ECONNREFUSED 127.0.0.1:7799
+```
+
+**Solutions:**
+
+1. **Check if validators are running:**
+
+```bash
+lsof -i :8899  # Base layer
+lsof -i :7799  # Ephemeral Rollup
+```
+
+2. **Start validators if not running:**
+
+```bash
+# Terminal 1
+mb-test-validator --reset
+
+# Terminal 2
+RUST_LOG=info ephemeral-validator \
+  --remotes "http://127.0.0.1:8899" \
+  --remotes "ws://127.0.0.1:8900" \
+  -l "127.0.0.1:7799" \
+  --reset
+```
+
+3. **Check validator health:**
+
+```bash
+curl http://127.0.0.1:8899/health
+curl http://127.0.0.1:7799/health
+```
+
+4. **View validator logs:**
+
+```bash
+tail -f /tmp/mb-test-validator.log
+tail -f /tmp/ephemeral-validator.log
+```
+
+</Accordion>
+
+<Accordion title="Wrong cluster endpoint configured">
+
+**Problem:** Tests connect to devnet when you expect localnet, or vice versa.
+
+**Solution:**
+
+Check your `Anchor.toml` configuration:
+
+```toml Anchor.toml
+[provider]
+cluster = "localnet"  # Should match your intended network
+wallet = "~/.config/solana/id.json"
+```
+
+Verify environment variables:
+
+```bash
+echo $EPHEMERAL_PROVIDER_ENDPOINT
+echo $ANCHOR_PROVIDER_URL
+```
+
+Expected values for localnet:
+```
+EPHEMERAL_PROVIDER_ENDPOINT=http://localhost:7799
+ANCHOR_PROVIDER_URL=http://127.0.0.1:8899
+```
+
+</Accordion>
+
+<Accordion title="ephemeral-validator not found">
+
+**Problem:**
+
+```
+Error: ephemeral-validator is not installed
+```
+
+**Solution:**
+
+Install the ephemeral validator globally:
+
+```bash
+npm install -g @magicblock-labs/ephemeral-validator
+```
+
+Verify installation:
+
+```bash
+which ephemeral-validator
+ephemeral-validator --version
+```
+
+If using nvm, ensure the global package is accessible:
+
+```bash
+npm config get prefix
+# Should show your nvm node version path
+```
+
+</Accordion>
+
+<Accordion title="WebSocket connection failed">
+
+**Problem:** Tests timeout or fail with WebSocket errors:
+
+```
+Error: WebSocket connection to 'ws://localhost:7800' failed
+```
+
+**Solutions:**
+
+1. **Verify WebSocket endpoint configuration:**
+
+```typescript
+const providerEphemeralRollup = new anchor.AnchorProvider(
+  new anchor.web3.Connection(
+    process.env.EPHEMERAL_PROVIDER_ENDPOINT || "http://localhost:7799",
+    {
+      wsEndpoint: process.env.EPHEMERAL_WS_ENDPOINT || "ws://localhost:7800",
+    }
+  ),
+  anchor.Wallet.local()
+);
+```
+
+2. **Check if ephemeral-validator is listening on WS port:**
+
+```bash
+lsof -i :7800
+```
+
+3. **Restart ephemeral-validator with correct ports:**
+
+```bash
+RUST_LOG=info ephemeral-validator \
+  --remotes "http://127.0.0.1:8899" \
+  --remotes "ws://127.0.0.1:8900" \
+  -l "127.0.0.1:7799" \
+  --reset
+```
+
+The WebSocket will be available on port 7800 (RPC port + 1).
+
+</Accordion>
+
+</AccordionGroup>
+
+## Build and Deployment Issues
+
+<AccordionGroup>
+
+<Accordion title="Program already deployed with different address">
+
+**Problem:** Program ID mismatch errors when deploying:
+
+```
+Error: Program <ID> is already deployed at a different address
+```
+
+**Solution:**
+
+Delete existing keypairs and rebuild:
+
+```bash
+rm -rf target/deploy/*.json
+anchor build
+anchor deploy --provider.cluster localnet
+```
+
+Update program IDs in:
+- `Anchor.toml`
+- `lib.rs` (declare_id! macro)
+- Any test files
+
+</Accordion>
+
+<Accordion title="Anchor build fails with dependency errors">
+
+**Problem:**
+
+```
+error: package `ephemeral-rollups-sdk` cannot be built
+```
+
+**Solutions:**
+
+1. **Update dependencies:**
+
+```bash
+cargo update
+```
+
+2. **Check Rust version:**
+
+```bash
+rustc --version
+# Should be 1.85.0 or later
+rustup update
+```
+
+3. **Verify Anchor version:**
+
+```bash
+anchor --version
+# Should be 0.32.1
+avm use 0.32.1
+```
+
+4. **Clean and rebuild:**
+
+```bash
+anchor clean
+cargo clean
+anchor build
+```
+
+</Accordion>
+
+<Accordion title="Deployment fails with insufficient funds">
+
+**Problem:**
+
+```
+Error: Account <address> has insufficient funds for rent
+```
+
+**Solution:**
+
+For localnet, airdrop SOL:
+
+```bash
+solana airdrop 100 --url http://localhost:8899
+```
+
+For devnet:
+
+```bash
+solana airdrop 2 --url https://api.devnet.solana.com
+```
+
+Check balance:
+
+```bash
+solana balance --url http://localhost:8899
+```
+
+</Accordion>
+
+<Accordion title="Anchor test starts wrong validator">
+
+**Problem:** `anchor test` starts its own validator instead of using the running one.
+
+**Solution:**
+
+Use the `--skip-local-validator` flag:
+
+```bash
+anchor test --skip-local-validator --skip-build --skip-deploy
+```
+
+Or set in `Anchor.toml`:
+
+```toml
+[scripts]
+test = "./fullstack-test.sh --skip-local-validator"
+```
+
+The test script will automatically detect and use running validators.
+
+</Accordion>
+
+</AccordionGroup>
+
+## Delegation Issues
+
+<AccordionGroup>
+
+<Accordion title="Account not found after delegation">
+
+**Problem:** Tests fail immediately after delegation:
+
+```
+Error: Account not found
+```
+
+**Solution:**
+
+Add a delay after delegation to allow propagation:
+
+```typescript
+it("Delegate counter to ER", async () => {
+  // ... delegation code
+  await provider.sendAndConfirm(tx, [provider.wallet.payer]);
+  
+  // Wait for delegation to propagate
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+});
+```
+
+<Note>
+A 2-3 second delay is typically sufficient for delegation to complete.
+</Note>
+
+</Accordion>
+
+<Accordion title="Delegation instruction missing accounts">
+
+**Problem:**
+
+```
+Error: Missing required account for delegation
+```
+
+**Solution:**
+
+For localnet, include the validator identity in remaining accounts:
+
+```typescript
+const remainingAccounts =
+  providerEphemeralRollup.connection.rpcEndpoint.includes("localhost") ||
+  providerEphemeralRollup.connection.rpcEndpoint.includes("127.0.0.1")
+    ? [
+        {
+          pubkey: new web3.PublicKey("mAGicPQYBMvcYveUZA5F5UNNwyHvfYh5xkLS2Fr1mev"),
+          isSigner: false,
+          isWritable: false,
+        },
+      ]
+    : [];
+
+let tx = await program.methods
+  .delegate()
+  .accounts({ /* ... */ })
+  .remainingAccounts(remainingAccounts)
+  .transaction();
+```
+
+</Accordion>
+
+<Accordion title="Delegation fails with 'Invalid seeds'">
+
+**Problem:**
+
+```
+Error: Invalid seeds for PDA derivation
+```
+
+**Solution:**
+
+Ensure PDA seeds match between delegation and program:
+
+```rust
+// In your program
+const TEST_PDA_SEED: &[u8] = b"counter";
+
+pub fn delegate(ctx: Context<DelegateInput>) -> Result<()> {
+    let pda_seeds: &[&[u8]] = &[TEST_PDA_SEED];
+    
+    delegate_account(
+        // ... accounts
+        pda_seeds,
+        0,     // max delegation lifetime
+        30000, // commit interval in ms
+    )?;
+    Ok(())
+}
+```
+
+Verify PDA derivation in tests:
+
+```typescript
+const [counterPDA] = anchor.web3.PublicKey.findProgramAddressSync(
+  [Buffer.from("counter")],  // Must match TEST_PDA_SEED
+  program.programId
+);
+```
+
+</Accordion>
+
+<Accordion title="Cannot delegate already delegated account">
+
+**Problem:**
+
+```
+Error: Account is already delegated
+```
+
+**Solution:**
+
+Undelegate before re-delegating:
+
+```typescript
+import { createUndelegateInstruction } from "@magicblock-labs/ephemeral-rollups-sdk";
+
+const ix = createUndelegateInstruction({
+  payer: provider.wallet.publicKey,
+  delegatedAccount: pda,
+  ownerProgram: program.programId,
+  reimbursement: provider.wallet.publicKey,
+});
+
+const tx = new anchor.web3.Transaction().add(ix);
+await provider.sendAndConfirm(tx);
+```
+
+Or reset the validator:
+
+```bash
+pkill -f "ephemeral-validator"
+rm -rf magicblock-test-storage
+
+RUST_LOG=info ephemeral-validator \
+  --remotes "http://127.0.0.1:8899" \
+  --remotes "ws://127.0.0.1:8900" \
+  -l "127.0.0.1:7799" \
+  --reset
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+## Commit and State Issues
+
+<AccordionGroup>
+
+<Accordion title="Commit transaction fails">
+
+**Problem:**
+
+```
+Error: Transaction simulation failed
+```
+
+**Solution:**
+
+Use `skipPreflight: true` when committing:
+
+```typescript
+const txHash = await providerEphemeralRollup.sendAndConfirm(tx, [], {
+  skipPreflight: true,
+});
+```
+
+Commits may fail simulation but still succeed on-chain.
+
+</Accordion>
+
+<Accordion title="GetCommitmentSignature timeout">
+
+**Problem:**
+
+```
+Error: Timeout waiting for commitment signature
+```
+
+**Solution:**
+
+Increase timeout or check base layer connectivity:
+
+```typescript
+import { GetCommitmentSignature } from "@magicblock-labs/ephemeral-rollups-sdk";
+
+// Wait longer for commitment
+await new Promise((resolve) => setTimeout(resolve, 5000));
+
+const txCommitSgn = await GetCommitmentSignature(
+  txHash,
+  providerEphemeralRollup.connection
+);
+```
+
+Verify base layer is reachable:
+
+```bash
+curl http://127.0.0.1:8899/health
+```
+
+</Accordion>
+
+<Accordion title="State mismatch between ER and base layer">
+
+**Problem:** Account state differs between Ephemeral Rollup and base layer.
+
+**Solution:**
+
+1. **Explicitly commit changes:**
+
+```typescript
+let tx = await program.methods
+  .commit()
+  .accounts({
+    payer: providerEphemeralRollup.wallet.publicKey,
+  })
+  .transaction();
+
+await providerEphemeralRollup.sendAndConfirm(tx, [], {
+  skipPreflight: true,
+});
+```
+
+2. **Wait for commitment to finalize:**
+
+```typescript
+const txCommitSgn = await GetCommitmentSignature(
+  txHash,
+  providerEphemeralRollup.connection
+);
+
+// Wait for confirmation on base layer
+await provider.connection.confirmTransaction(txCommitSgn, "confirmed");
+```
+
+3. **Verify commit interval in delegation:**
+
+```rust
+delegate_account(
+    // ... accounts
+    pda_seeds,
+    0,
+    30000, // Commit every 30 seconds
+)?;
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+## Version Compatibility
+
+<AccordionGroup>
+
+<Accordion title="Solana version mismatch">
+
+**Problem:**
+
+```
+Error: Solana version mismatch
+```
+
+**Solution:**
+
+Use the correct Solana version (2.3.13):
+
+```bash
+agave-install list
+agave-install init 2.3.13
+solana --version
+```
+
+Update PATH:
+
+```bash
+export PATH="~/.local/share/solana/install/active_release/bin:$PATH"
+```
+
+</Accordion>
+
+<Accordion title="Anchor version incompatibility">
+
+**Problem:**
+
+```
+Error: Anchor version 0.30.0 is not compatible
+```
+
+**Solution:**
+
+Install and use Anchor 0.32.1:
+
+```bash
+avm install 0.32.1
+avm use 0.32.1
+anchor --version
+```
+
+Update `Anchor.toml`:
+
+```toml
+[toolchain]
+anchor_version = "0.32.1"
+```
+
+</Accordion>
+
+<Accordion title="SDK version mismatch">
+
+**Problem:**
+
+```
+Error: Cannot find module '@magicblock-labs/ephemeral-rollups-sdk'
+```
+
+**Solution:**
+
+Install the correct SDK version:
+
+```bash
+yarn add @magicblock-labs/ephemeral-rollups-sdk@0.6.5
+```
+
+For Rust:
+
+```bash
+cargo add ephemeral-rollups-sdk
+```
+
+Verify in `package.json`:
+
+```json
+{
+  "dependencies": {
+    "@coral-xyz/anchor": "0.32.1",
+    "@magicblock-labs/ephemeral-rollups-sdk": "0.6.5"
+  }
+}
+```
+
+</Accordion>
+
+<Accordion title="Node.js version issues">
+
+**Problem:**
+
+```
+Error: This version of Node.js requires a different ABI
+```
+
+**Solution:**
+
+Use Node.js v24.10.0 or compatible:
+
+```bash
+# Using nvm
+nvm install 24.10.0
+nvm use 24.10.0
+node --version
+```
+
+Reinstall dependencies:
+
+```bash
+rm -rf node_modules yarn.lock
+yarn install
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+## Test Execution Issues
+
+<AccordionGroup>
+
+<Accordion title="Tests timeout">
+
+**Problem:**
+
+```
+Error: Timeout of 2000ms exceeded
+```
+
+**Solution:**
+
+Increase mocha timeout:
+
+```bash
+yarn ts-mocha --colors -p ./tsconfig.json -t 1000000 tests/**/*.ts
+```
+
+Or in test files:
+
+```typescript
+describe("anchor-counter", function () {
+  this.timeout(1000000); // 1000 seconds
+  
+  // ... tests
+});
+```
+
+</Accordion>
+
+<Accordion title="Tests pass locally but fail in CI">
+
+**Problem:** Tests work on local machine but fail in continuous integration.
+
+**Solution:**
+
+1. **Ensure validators start properly:**
+
+```yaml .github/workflows/test.yml
+- name: Wait for validators
+  run: |
+    for i in {1..60}; do
+      if curl -s http://127.0.0.1:8899/health > /dev/null; then
+        echo "Validator ready"
+        break
+      fi
+      sleep 1
+    done
+```
+
+2. **Add sufficient delays:**
+
+```typescript
+// After delegation
+await new Promise((resolve) => setTimeout(resolve, 5000));
+```
+
+3. **Use --skip-local-validator in CI:**
+
+```bash
+anchor test --skip-build --skip-deploy --skip-local-validator
+```
+
+</Accordion>
+
+<Accordion title="Multiple validator instances running">
+
+**Problem:** Multiple validators interfere with each other.
+
+**Solution:**
+
+Kill all validator processes:
+
+```bash
+pkill -f "solana-test-validator"
+pkill -f "mb-test-validator"
+pkill -f "ephemeral-validator"
+```
+
+Clean ledger directories:
+
+```bash
+rm -rf test-ledger test-ledger-magicblock magicblock-test-storage
+```
+
+Restart validators:
+
+```bash
+mb-test-validator --reset
+```
+
+</Accordion>
+
+<Accordion title="Transaction signature verification failed">
+
+**Problem:**
+
+```
+Error: Transaction signature verification failed
+```
+
+**Solution:**
+
+Ensure wallet is properly configured:
+
+```typescript
+const provider = anchor.AnchorProvider.env();
+anchor.setProvider(provider);
+
+// Verify wallet
+console.log("Wallet:", provider.wallet.publicKey.toString());
+```
+
+Check wallet file exists:
+
+```bash
+ls -la ~/.config/solana/id.json
+```
+
+Generate if missing:
+
+```bash
+solana-keygen new --no-bip39-passphrase --outfile ~/.config/solana/id.json
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+## Performance Issues
+
+<AccordionGroup>
+
+<Accordion title="Slow transaction confirmation">
+
+**Problem:** Transactions take longer than expected to confirm.
+
+**Solution:**
+
+1. **Use appropriate commitment levels:**
+
+```typescript
+// Base layer - use 'confirmed'
+const txHash = await provider.sendAndConfirm(tx, [provider.wallet.payer], {
+  skipPreflight: true,
+  commitment: "confirmed",
+});
+
+// ER - usually faster
+const txHash = await providerEphemeralRollup.sendAndConfirm(tx);
+```
+
+2. **Check network congestion:**
+
+```bash
+solana block-time --url http://localhost:8899
+```
+
+3. **Monitor validator performance:**
+
+```bash
+tail -f /tmp/ephemeral-validator.log | grep "slot"
+```
+
+</Accordion>
+
+<Accordion title="High memory usage">
+
+**Problem:** Validators consume excessive memory.
+
+**Solution:**
+
+Restart validators periodically:
+
+```bash
+pkill -f "ephemeral-validator"
+rm -rf magicblock-test-storage
+
+RUST_LOG=info ephemeral-validator \
+  --remotes "http://127.0.0.1:8899" \
+  --remotes "ws://127.0.0.1:8900" \
+  -l "127.0.0.1:7799" \
+  --reset
+```
+
+Limit ledger size:
+
+```bash
+mb-test-validator --reset --limit-ledger-size 50000000
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+## Getting Help
+
+If you encounter issues not covered here:
+
+1. **Check validator logs:**
+   ```bash
+   tail -f /tmp/mb-test-validator.log
+   tail -f /tmp/ephemeral-validator.log
+   ```
+
+2. **Enable debug logging:**
+   ```bash
+   RUST_LOG=debug anchor test
+   ```
+
+3. **Join the community:**
+   - [MagicBlock Discord](https://discord.com/invite/MBkdC3gxcv)
+   - [GitHub Issues](https://github.com/magicblock-labs/ephemeral-rollups-examples/issues)
+
+4. **Review documentation:**
+   - [MagicBlock Documentation](https://docs.magicblock.gg/)
+   - [Local Development Guide](https://docs.magicblock.gg/pages/ephemeral-rollups-ers/how-to-guide/local-development)
+
+## Next Steps
+
+- Review [Local Setup Guide](/development/local-setup)
+- Explore [Testing Patterns](/development/testing)
+- Try the [Example Programs](/examples/anchor-counter)

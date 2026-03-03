@@ -1,0 +1,379 @@
+---
+title: "Roll Dice"
+description: "Verifiable randomness with VRF integration in Ephemeral Rollups"
+---
+
+# Roll Dice
+
+The Roll Dice example demonstrates how to integrate MagicBlock's Verifiable Random Function (VRF) to generate provably fair random numbers within Ephemeral Rollups. This is essential for games, lotteries, and any application requiring unpredictable, tamper-proof randomness.
+
+<Info>
+Try the live demo at [https://roll-dice-demo.vercel.app](https://roll-dice-demo.vercel.app)
+</Info>
+
+## What is VRF?
+
+A Verifiable Random Function (VRF) generates random numbers that are:
+
+- **Unpredictable**: Cannot be predicted before generation
+- **Verifiable**: Can be proven to be random
+- **Tamper-proof**: Cannot be manipulated by validators or users
+- **Deterministic**: Given the same input, produces the same output (verifiable)
+
+<Warning>
+Never use simple on-chain methods like `Clock::get()?.unix_timestamp` for randomness - they are predictable and can be exploited!
+</Warning>
+
+## Two Approaches
+
+This example includes two implementations:
+
+<Tabs>
+  <Tab title="Non-Delegated">
+    The standard approach where the player account remains on the base layer:
+    
+    ```rust programs/roll-dice/src/lib.rs
+    use ephemeral_vrf_sdk::anchor::vrf;
+    use ephemeral_vrf_sdk::instructions::{create_request_randomness_ix, RequestRandomnessParams};
+
+    #[program]
+    pub mod random_dice {
+        pub fn roll_dice(ctx: Context<DoRollDiceCtx>, client_seed: u8) -> Result<()> {
+            msg!("Requesting randomness...");
+            let ix = create_request_randomness_ix(RequestRandomnessParams {
+                payer: ctx.accounts.payer.key(),
+                oracle_queue: ctx.accounts.oracle_queue.key(),
+                callback_program_id: ID,
+                callback_discriminator: instruction::CallbackRollDice::DISCRIMINATOR.to_vec(),
+                caller_seed: [client_seed; 32],
+                accounts_metas: Some(vec![SerializableAccountMeta {
+                    pubkey: ctx.accounts.player.key(),
+                    is_signer: false,
+                    is_writable: true,
+                }]),
+                ..Default::default()
+            });
+            ctx.accounts
+                .invoke_signed_vrf(&ctx.accounts.payer.to_account_info(), &ix)?;
+            Ok()
+        }
+    }
+    ```
+  </Tab>
+  <Tab title="Delegated (Recommended)">
+    The advanced approach using Ephemeral Rollups for ultra-low latency:
+    
+    ```rust programs/roll-dice-delegated/src/lib.rs
+    use ephemeral_rollups_sdk::anchor::{commit, delegate, ephemeral};
+    use ephemeral_vrf_sdk::anchor::vrf;
+
+    #[ephemeral]
+    #[program]
+    pub mod random_dice_delegated {
+        pub fn roll_dice_delegated(ctx: Context<DoRollDiceDelegatedCtx>, client_seed: u8) -> Result<()> {
+            msg!("Requesting randomness...");
+            let ix = create_request_randomness_ix(RequestRandomnessParams {
+                payer: ctx.accounts.payer.key(),
+                oracle_queue: ctx.accounts.oracle_queue.key(),
+                callback_program_id: ID,
+                callback_discriminator: instruction::CallbackRollDiceSimple::DISCRIMINATOR.to_vec(),
+                caller_seed: [client_seed; 32],
+                accounts_metas: Some(vec![SerializableAccountMeta {
+                    pubkey: ctx.accounts.player.key(),
+                    is_signer: false,
+                    is_writable: true,
+                }]),
+                ..Default::default()
+            });
+            ctx.accounts
+                .invoke_signed_vrf(&ctx.accounts.payer.to_account_info(), &ix)?;
+            Ok()
+        }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## How It Works
+
+<Steps>
+
+### Request Randomness
+
+Your program requests random numbers from the VRF oracle:
+
+```rust programs/roll-dice/src/lib.rs
+let ix = create_request_randomness_ix(RequestRandomnessParams {
+    payer: ctx.accounts.payer.key(),
+    oracle_queue: ctx.accounts.oracle_queue.key(),
+    callback_program_id: ID,
+    callback_discriminator: instruction::CallbackRollDice::DISCRIMINATOR.to_vec(),
+    caller_seed: [client_seed; 32],
+    accounts_metas: Some(vec![SerializableAccountMeta {
+        pubkey: ctx.accounts.player.key(),
+        is_signer: false,
+        is_writable: true,
+    }]),
+    ..Default::default()
+});
+ctx.accounts.invoke_signed_vrf(&ctx.accounts.payer.to_account_info(), &ix)?;
+```
+
+### Mark Context with `#[vrf]`
+
+Annotate your request context with the `#[vrf]` macro:
+
+```rust programs/roll-dice-delegated/src/lib.rs
+#[vrf]
+#[derive(Accounts)]
+pub struct DoRollDiceDelegatedCtx<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(seeds = [PLAYER_SEED, payer.key().to_bytes().as_slice()], bump)]
+    pub player: Account<'info, Player>,
+    /// CHECK: The oracle queue
+    #[account(mut, address = ephemeral_vrf_sdk::consts::DEFAULT_EPHEMERAL_QUEUE)]
+    pub oracle_queue: AccountInfo<'info>,
+}
+```
+
+### Implement the Callback
+
+Define a callback function that receives the random number:
+
+```rust programs/roll-dice-delegated/src/lib.rs
+pub fn callback_roll_dice_simple(
+    ctx: Context<CallbackRollDiceSimpleCtx>,
+    randomness: [u8; 32],
+) -> Result<()> {
+    let player = &mut ctx.accounts.player;
+    let rnd_u8 = ephemeral_vrf_sdk::rnd::random_u8_with_range(&randomness, 1, 6);
+    msg!("Consuming random number: {:?}", rnd_u8);
+    player.rollnum = player.rollnum.saturating_add(1);
+    msg!("Roll number: {:?}", player.rollnum);
+    player.last_result = rnd_u8;
+    Ok()
+}
+```
+
+### Verify the VRF Signer
+
+The callback context must verify it's called by the VRF program:
+
+```rust programs/roll-dice-delegated/src/lib.rs
+#[derive(Accounts)]
+pub struct CallbackRollDiceSimpleCtx<'info> {
+    /// This check ensures that the vrf_program_identity (which is a PDA) is a signer
+    /// enforcing the callback is executed by the VRF program through CPI
+    #[account(address = ephemeral_vrf_sdk::consts::VRF_PROGRAM_IDENTITY)]
+    pub vrf_program_identity: Signer<'info>,
+    #[account(mut)]
+    pub player: Account<'info, Player>,
+}
+```
+
+</Steps>
+
+## Oracle Queues
+
+Different oracle queues for different environments:
+
+<CodeGroup>
+
+```rust Base Layer Oracle
+use ephemeral_vrf_sdk::consts::DEFAULT_QUEUE;
+
+#[account(mut, address = DEFAULT_QUEUE)]
+pub oracle_queue: AccountInfo<'info>,
+```
+
+```rust Ephemeral Rollup Oracle
+use ephemeral_vrf_sdk::consts::DEFAULT_EPHEMERAL_QUEUE;
+
+#[account(mut, address = DEFAULT_EPHEMERAL_QUEUE)]
+pub oracle_queue: AccountInfo<'info>,
+```
+
+</CodeGroup>
+
+## Player Account Structure
+
+```rust programs/roll-dice-delegated/src/lib.rs
+#[account]
+pub struct Player {
+    pub last_result: u8,  // The result of the last dice roll (1-6)
+    pub rollnum: u8,      // Number of times the player has rolled
+}
+
+pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+    msg!(
+        "Initializing player account: {:?}",
+        ctx.accounts.player.key()
+    );
+    let player = &mut ctx.accounts.player;
+    player.last_result = 0;
+    player.rollnum = 0;
+    Ok()
+}
+```
+
+## Random Number Utilities
+
+The VRF SDK provides helper functions for common use cases:
+
+```rust
+use ephemeral_vrf_sdk::rnd::random_u8_with_range;
+
+// Roll a die (1-6)
+let dice_result = random_u8_with_range(&randomness, 1, 6);
+
+// Coin flip (0-1)
+let coin_flip = random_u8_with_range(&randomness, 0, 1);
+
+// Percentage (1-100)
+let percentage = random_u8_with_range(&randomness, 1, 100);
+```
+
+## Delegated vs Non-Delegated
+
+<Tabs>
+  <Tab title="Delegated (Advanced)">
+    **Benefits:**
+    - Ultra-low latency rolls in the ER
+    - Rapid successive rolls without base layer delays
+    - Can batch multiple rolls before committing
+    - Perfect for real-time gaming
+
+    **Setup:**
+    ```rust
+    #[ephemeral]
+    #[program]
+    pub mod random_dice_delegated {
+        // Use DEFAULT_EPHEMERAL_QUEUE
+    }
+    ```
+  </Tab>
+  <Tab title="Non-Delegated">
+    **Benefits:**
+    - Simpler setup, no delegation needed
+    - Results immediately on base layer
+    - Good for single-roll scenarios
+
+    **Setup:**
+    ```rust
+    #[program]
+    pub mod random_dice {
+        // Use DEFAULT_QUEUE
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Delegating the Player Account
+
+For the delegated approach, delegate the player account to the ER:
+
+```rust programs/roll-dice-delegated/src/lib.rs
+pub fn delegate(ctx: Context<DelegateInput>) -> Result<()> {
+    ctx.accounts.delegate_player(
+        &ctx.accounts.user,
+        &[PLAYER_SEED, &ctx.accounts.user.key().to_bytes().as_slice()],
+        DelegateConfig {
+            validator: ctx.remaining_accounts.first().map(|acc| acc.key()),
+            ..Default::default()
+        },
+    )?;
+    Ok()
+}
+
+#[delegate]
+#[derive(Accounts)]
+pub struct DelegateInput<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+    #[account(mut, del, seeds = [PLAYER_SEED, user.key().to_bytes().as_slice()], bump)]
+    pub player: Account<'info, Player>,
+}
+```
+
+## Required Dependencies
+
+```toml Cargo.toml
+[dependencies]
+ephemeral-rollups-sdk = "0.1.0"
+ephemeral-vrf-sdk = "0.1.0"
+anchor-lang = "0.32.1"
+```
+
+## What Makes This Advanced?
+
+This example demonstrates several advanced concepts:
+
+1. **VRF Integration**: Secure, verifiable randomness generation
+2. **Callback Pattern**: Asynchronous request-response flow
+3. **ER-Optimized VRF**: Using the ephemeral oracle queue for low-latency randomness
+4. **Delegation**: Managing player accounts in ERs for instant rolls
+5. **Seed Management**: Using client seeds for additional entropy
+
+## Use Cases
+
+- **Dice Games**: Provably fair dice rolls (shown in this example)
+- **Loot Drops**: Random item generation in games
+- **Lotteries**: Fair winner selection
+- **Card Shuffling**: Randomized deck ordering
+- **Procedural Generation**: Random dungeon/world generation
+- **NFT Traits**: Random trait assignment at mint
+
+## Live Demo
+
+Experience the dice rolling in action:
+
+- **Demo URL**: [https://roll-dice-demo.vercel.app](https://roll-dice-demo.vercel.app)
+- **Delegated Demo**: [https://roll-dice-demo.vercel.app/delegated](https://roll-dice-demo.vercel.app/delegated)
+
+The demo showcases the difference in latency between delegated and non-delegated approaches.
+
+## Frontend Integration
+
+Here's how to call the roll dice function from your frontend:
+
+```typescript
+import { Program } from "@coral-xyz/anchor";
+
+// Roll the dice
+const clientSeed = Math.floor(Math.random() * 256); // Random seed
+const tx = await program.methods
+  .rollDiceDelegated(clientSeed)
+  .accounts({
+    payer: wallet.publicKey,
+    player: playerPDA,
+    oracleQueue: DEFAULT_EPHEMERAL_QUEUE,
+  })
+  .rpc();
+
+// Wait a moment for the callback
+await new Promise(resolve => setTimeout(resolve, 1000));
+
+// Fetch the result
+const playerAccount = await program.account.player.fetch(playerPDA);
+console.log(`You rolled a ${playerAccount.lastResult}!`);
+```
+
+## Security Considerations
+
+<Warning>
+**Important:**
+
+- Always use the VRF oracle for randomness in production
+- Never trust client-provided random numbers
+- Verify the VRF program identity in callbacks
+- The `caller_seed` adds entropy but doesn't replace VRF security
+- Store critical game logic on-chain, not in the client
+</Warning>
+
+## Next Steps
+
+- Explore [Session Keys](/examples/session-keys) to enable gasless dice rolls
+- Learn about [Magic Actions](/examples/magic-actions) to trigger rewards on lucky rolls
+- Check the [full source code](https://github.com/magicblock-labs/ephemeral-rollups-examples/tree/main/roll-dice)
+- Try the [live demo](https://roll-dice-demo.vercel.app)

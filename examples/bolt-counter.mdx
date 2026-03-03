@@ -1,0 +1,327 @@
+---
+title: Bolt Counter
+description: Simple counter using Bolt ECS framework with components and systems for Ephemeral Rollups
+---
+
+A simple counter program demonstrating how to use the Bolt ECS (Entity Component System) framework with Ephemeral Rollups. This example shows how to create delegatable components, apply systems, and manage entities in a game-like architecture.
+
+## What You'll Learn
+
+- How to create Bolt components with the `#[component(delegate)]` attribute
+- How to build systems that operate on components
+- How to initialize a Bolt world and add entities
+- How to delegate component accounts to Ephemeral Rollups
+- How to apply systems for low-latency execution
+- How to undelegate components back to Solana
+
+## Program Structure
+
+The Bolt counter example consists of two main parts:
+
+### Component
+- **Counter** - A delegatable component that stores a `count` value
+
+### System
+- **Increase** - A system that increments the counter component by 1
+
+## Software Requirements
+
+<Note>
+Bolt has its own build tool. Ensure you have it installed before building.
+</Note>
+
+Read more about the Bolt framework: [Bolt Documentation](https://docs.magicblock.gg/BOLT/Introduction/introduction)
+
+## Build and Test
+
+<Steps>
+  <Step title="Build the program">
+    Build using the Bolt CLI:
+    
+    ```bash
+    bolt build
+    ```
+  </Step>
+
+  <Step title="Configure Ephemeral Rollup endpoints">
+    Set the environment variables for the Ephemeral Rollup:
+    
+    ```bash
+    export PROVIDER_ENDPOINT="<provided endpoint>"
+    export WS_ENDPOINT="<provided endpoint>"
+    ```
+  </Step>
+
+  <Step title="Run tests">
+    Execute the test suite (skip deploy if already deployed):
+    
+    ```bash
+    bolt test --skip-deploy
+    ```
+  </Step>
+</Steps>
+
+## Component Implementation
+
+The Counter component uses the `#[component(delegate)]` attribute to make it delegatable:
+
+```rust
+use bolt_lang::*;
+
+declare_id!("8G57v8BL4myb9FtXwLiwionAGZcZBGno2Ckps2AsGXwV");
+
+#[component(delegate)]
+#[derive(Default)]
+pub struct Counter {
+    pub count: u64,
+}
+```
+
+<Info>
+The `#[component(delegate)]` attribute automatically generates the necessary code to make this component delegatable to Ephemeral Rollups.
+</Info>
+
+## System Implementation
+
+The Increase system operates on the Counter component:
+
+```rust
+use bolt_lang::*;
+use counter::Counter;
+
+declare_id!("4uNf52XJbJCqSofxkuYbjTC1DaYinpoUixaQQhrNPZkg");
+
+#[system]
+pub mod increase {
+
+    pub fn execute(ctx: Context<Components>, _args_p: Vec<u8>) -> Result<Components> {
+        let counter = &mut ctx.accounts.counter;
+        counter.count += 1;
+        Ok(ctx.accounts)
+    }
+
+    #[system_input]
+    pub struct Components {
+        pub counter: Counter,
+    }
+}
+```
+
+<Info>
+Systems in Bolt are pure functions that take components as input and return the modified components.
+</Info>
+
+## TypeScript Client Usage
+
+### Initialize World and Entity
+
+```typescript
+import * as anchor from "@coral-xyz/anchor";
+import { Program } from "@coral-xyz/anchor";
+import { PublicKey } from "@solana/web3.js";
+import {
+  InitializeNewWorld,
+  AddEntity,
+  InitializeComponent,
+  ApplySystem,
+  FindComponentPda,
+  createUndelegateInstruction,
+  createDelegateInstruction,
+} from "@magicblock-labs/bolt-sdk";
+
+const provider = anchor.AnchorProvider.env();
+const counterComponent = anchor.workspace.Counter as Program<Counter>;
+const systemIncrease = anchor.workspace.Increase as Program<Increase>;
+
+let worldPda: PublicKey;
+let entityPda: PublicKey;
+
+// Initialize a new world
+const initNewWorld = await InitializeNewWorld({
+  payer: provider.wallet.publicKey,
+  connection: provider.connection,
+});
+const txSign = await provider.sendAndConfirm(initNewWorld.transaction);
+worldPda = initNewWorld.worldPda;
+
+// Add an entity
+const addEntity = await AddEntity({
+  payer: provider.wallet.publicKey,
+  world: worldPda,
+  connection: provider.connection,
+});
+const entityTxSign = await provider.sendAndConfirm(addEntity.transaction);
+entityPda = addEntity.entityPda;
+
+// Add the counter component to the entity
+const initComponent = await InitializeComponent({
+  payer: provider.wallet.publicKey,
+  entity: entityPda,
+  componentId: counterComponent.programId,
+});
+await provider.sendAndConfirm(initComponent.transaction);
+```
+
+### Delegate Component to Ephemeral Rollups
+
+```typescript
+const counterPda = FindComponentPda({
+  componentId: counterComponent.programId,
+  entity: entityPda,
+});
+
+const delegateIx = createDelegateInstruction({
+  entity: entityPda,
+  account: counterPda,
+  ownerProgram: counterComponent.programId,
+  payer: provider.wallet.publicKey,
+});
+
+const tx = new anchor.web3.Transaction().add(delegateIx);
+tx.feePayer = provider.wallet.publicKey;
+tx.recentBlockhash = (
+  await provider.connection.getLatestBlockhash({ commitment: "confirmed" })
+).blockhash;
+
+const txSign = await provider.sendAndConfirm(tx, [], {
+  commitment: "confirmed",
+  skipPreflight: true,
+});
+```
+
+### Apply System on Ephemeral Rollups
+
+```typescript
+const providerEphemeralRollup = new anchor.AnchorProvider(
+  new anchor.web3.Connection(
+    process.env.PROVIDER_ENDPOINT || "https://devnet.magicblock.app",
+    {
+      wsEndpoint: process.env.WS_ENDPOINT || "wss://devnet.magicblock.app",
+    }
+  ),
+  anchor.Wallet.local()
+);
+
+const applySystem = await ApplySystem({
+  authority: providerEphemeralRollup.wallet.publicKey,
+  world: worldPda,
+  entities: [
+    {
+      entity: entityPda,
+      components: [{ componentId: counterComponent.programId }],
+    },
+  ],
+  systemId: systemIncrease.programId,
+});
+
+const tx = applySystem.transaction;
+tx.feePayer = provider.wallet.publicKey;
+tx.recentBlockhash = (
+  await providerEphemeralRollup.connection.getLatestBlockhash()
+).blockhash;
+
+const txSign = await providerEphemeralRollup.sendAndConfirm(tx, [], {
+  skipPreflight: true,
+});
+console.log("Applied system:", txSign);
+```
+
+<Info>
+Systems are applied to entities, and Bolt automatically loads the required components for execution.
+</Info>
+
+### Undelegate Component
+
+```typescript
+const counterComponentPda = FindComponentPda({
+  componentId: counterComponent.programId,
+  entity: entityPda,
+});
+
+const undelegateIx = createUndelegateInstruction({
+  payer: provider.wallet.publicKey,
+  delegatedAccount: counterComponentPda,
+  componentPda: counterComponent.programId,
+});
+
+let tx = new anchor.web3.Transaction().add(undelegateIx);
+tx.feePayer = provider.wallet.publicKey;
+tx.recentBlockhash = (
+  await providerEphemeralRollup.connection.getLatestBlockhash()
+).blockhash;
+tx = await providerEphemeralRollup.wallet.signTransaction(tx);
+
+const txSign = await providerEphemeralRollup.sendAndConfirm(tx, [], {
+  skipPreflight: false,
+});
+```
+
+## Running with Local Ephemeral Rollup
+
+<Steps>
+  <Step title="Install the local validator">
+    ```bash
+    npm install -g @magicblock-labs/ephemeral-validator
+    ```
+  </Step>
+
+  <Step title="Start the local validator">
+    Run the validator pointing to devnet as the reference:
+    
+    ```bash
+    ACCOUNTS_REMOTE=https://rpc.magicblock.app/devnet ACCOUNTS_LIFECYCLE=ephemeral ephemeral-validator
+    ```
+  </Step>
+
+  <Step title="Run tests with local validator">
+    Point the tests to the local validator:
+    
+    ```bash
+    PROVIDER_ENDPOINT=http://localhost:8899 WS_ENDPOINT=ws://localhost:8900 anchor test --skip-build --skip-deploy --skip-local-validator
+    ```
+  </Step>
+</Steps>
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="ECS Architecture" icon="cubes">
+    Entity-Component-System pattern for composable game logic
+  </Card>
+  
+  <Card title="Delegatable Components" icon="share-nodes">
+    Components can be delegated to Ephemeral Rollups with a single attribute
+  </Card>
+  
+  <Card title="Composable Systems" icon="puzzle-piece">
+    Systems operate on components and can be combined for complex behaviors
+  </Card>
+  
+  <Card title="Built for Games" icon="gamepad">
+    Designed specifically for onchain game development patterns
+  </Card>
+</CardGroup>
+
+<Warning>
+Bolt is optimized for ECS patterns. For simpler use cases, consider using Anchor or native Rust instead.
+</Warning>
+
+## ECS Concepts
+
+### Entities
+Entities are unique identifiers (PDAs) that group components together. They represent game objects or actors.
+
+### Components
+Components are data containers attached to entities. In this example, `Counter` is a component that stores a count value.
+
+### Systems
+Systems contain the logic that operates on components. The `Increase` system increments the counter.
+
+### World
+A world is the top-level container that manages entities and their components.
+
+## Source Code
+
+View the complete source code on GitHub:
+
+[bolt-counter on GitHub](https://github.com/magicblock-labs/Solana-Unity-Examples/tree/main/bolt-counter)

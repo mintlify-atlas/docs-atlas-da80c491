@@ -1,0 +1,120 @@
+---
+title: Introduction
+description: Build high-performance games and applications on Solana with MagicBlock Engine and Ephemeral Rollups
+---
+
+# Welcome to MagicBlock Engine Examples
+
+MagicBlock Engine is a scaling solution for performant, composable games and applications on Solana. This repository provides practical examples of how to integrate Ephemeral Rollups into your Solana programs.
+
+## What are Ephemeral Rollups?
+
+Ephemeral Rollups (ERs) are temporary, high-performance execution environments that run alongside the Solana base layer. They enable:
+
+- **Low-latency transactions**: Execute transactions in milliseconds instead of seconds
+- **Reduced costs**: Lower transaction fees for high-frequency operations
+- **Seamless composability**: Accounts can move between base layer and Ephemeral Rollups
+- **Automatic state sync**: Changes are committed back to Solana automatically
+
+<Info>
+  The Ephemeral Rollups are currently under testing. Reach out on [Discord](https://discord.com/invite/MBkdC3gxcv) to get access to the testing endpoint.
+</Info>
+
+## Quick navigation
+
+<CardGroup cols={2}>
+  <Card
+    title="Quickstart"
+    icon="rocket"
+    href="/quickstart"
+  >
+    Get your first example running in minutes
+  </Card>
+  <Card
+    title="Core Concepts"
+    icon="book"
+    href="/concepts/ephemeral-rollups"
+  >
+    Learn about delegation, commits, and transaction flow
+  </Card>
+  <Card
+    title="Examples"
+    icon="code"
+    href="/examples/anchor-counter"
+  >
+    Explore integration patterns across frameworks
+  </Card>
+  <Card
+    title="MagicBlock Docs"
+    icon="arrow-up-right-from-square"
+    href="https://docs.magicblock.gg"
+  >
+    Read the complete MagicBlock documentation
+  </Card>
+</CardGroup>
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Account delegation" icon="link">
+    Delegate Solana accounts to Ephemeral Rollups for low-latency execution
+  </Card>
+  <Card title="Multiple frameworks" icon="layer-group">
+    Examples for Anchor, Bolt, Rust Native, and Pinocchio
+  </Card>
+  <Card title="Automatic commits" icon="rotate">
+    State changes sync back to Solana automatically or on-demand
+  </Card>
+  <Card title="Magic Actions" icon="wand-magic-sparkles">
+    Execute base chain actions automatically on commit
+  </Card>
+  <Card title="Session keys" icon="key">
+    Enable gasless transactions with session-based authentication
+  </Card>
+  <Card title="Scheduled cranks" icon="clock">
+    Automate periodic program execution with the crank system
+  </Card>
+</CardGroup>
+
+## Available examples
+
+### Framework examples
+
+- **[Anchor Counter](/examples/anchor-counter)** - Simple counter using Anchor framework
+- **[Rust Counter](/examples/rust-counter)** - Native Rust implementation without frameworks
+- **[Bolt Counter](/examples/bolt-counter)** - ECS-based counter using the Bolt framework
+- **[Pinocchio Counter](/examples/pinocchio-counter)** - Lightweight counter with Pinocchio
+
+### Advanced examples
+
+- **[Crank Counter](/examples/crank-counter)** - Scheduled automatic execution with cranks
+- **[Magic Actions](/examples/magic-actions)** - Trigger base chain actions from Ephemeral Rollups
+- **[Session Keys](/examples/session-keys)** - Gasless transactions with delegated signing
+- **[Token Transfer](/examples/token-transfer)** - SPL token operations in Ephemeral Rollups
+- **[Roll Dice](/examples/roll-dice)** - VRF integration for randomness
+
+## How it works
+
+The typical workflow for using Ephemeral Rollups follows three steps:
+
+<Steps>
+  <Step title="Delegate accounts">
+    Transfer account ownership to the delegation program using CPI calls in your Solana program.
+  </Step>
+  <Step title="Execute transactions">
+    Run transactions against delegated accounts in the Ephemeral Rollup with millisecond latency.
+  </Step>
+  <Step title="Commit or undelegate">
+    Sync state changes back to Solana either automatically, manually, or when undelegating.
+  </Step>
+</Steps>
+
+## Getting started
+
+Ready to build? Check out the [Quickstart guide](/quickstart) to run your first example in minutes.
+
+For complete documentation on Ephemeral Rollups, architecture details, and production deployment, visit [docs.magicblock.gg](https://docs.magicblock.gg).
+
+<Note>
+  For integrated demos showcasing specific use cases, explore the [MagicBlock Starter Kits](https://github.com/magicblock-labs/starter-kits).
+</Note>

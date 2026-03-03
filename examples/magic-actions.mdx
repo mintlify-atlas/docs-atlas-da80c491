@@ -1,0 +1,291 @@
+---
+title: "Magic Actions"
+description: "Automatic on-chain handlers triggered when committing from Ephemeral Rollups"
+---
+
+# Magic Actions
+
+Magic Actions enable you to execute automatic on-chain handlers when committing accounts from Ephemeral Rollups back to the base layer. This powerful pattern allows you to perform base chain operations (like updating global state) automatically whenever ER state is committed.
+
+## What Are Magic Actions?
+
+Magic Actions are instruction handlers that execute automatically on the base chain when you commit delegated accounts from an Ephemeral Rollup. They enable:
+
+- Updating global leaderboards when player scores are committed
+- Triggering reward distributions based on ER activity
+- Synchronizing cross-program state
+- Executing base-layer-only operations (like SPL token transfers) on commit
+
+<Info>
+Magic Actions execute on the base layer (Solana mainnet/devnet) using funds from an escrow account, allowing automated base chain interactions without user signatures.
+</Info>
+
+## How It Works
+
+<Steps>
+
+### Mark Your Handler with `#[action]`
+
+Create an instruction that will execute on the base layer when accounts are committed:
+
+```rust programs/magic-actions/src/lib.rs
+#[action]
+#[derive(Accounts)]
+pub struct UpdateLeaderboard<'info> {
+    #[account(mut, seeds = [LEADERBOARD_SEED], bump)]
+    pub leaderboard: Account<'info, Leaderboard>,
+    /// CHECK: PDA owner depends on: 1) Delegated: Delegation Program; 2) Undelegated: Your program ID
+    pub counter: UncheckedAccount<'info>,
+}
+
+pub fn update_leaderboard(ctx: Context<UpdateLeaderboard>) -> Result<()> {
+    let leaderboard = &mut ctx.accounts.leaderboard;
+    let counter_info = &mut ctx.accounts.counter.to_account_info();
+    let mut data: &[u8] = &counter_info.try_borrow_data()?;
+    let counter = Counter::try_deserialize(&mut data)?;
+
+    if counter.count > leaderboard.high_score {
+        leaderboard.high_score = counter.count;
+    }
+
+    msg!(
+        "Leaderboard updated! High score: {}",
+        leaderboard.high_score
+    );
+    Ok()
+}
+```
+
+### Build the Magic Action Instruction
+
+Create the action instruction that will execute on commit:
+
+```rust programs/magic-actions/src/lib.rs
+pub fn commit_and_update_leaderboard(ctx: Context<CommitAndUpdateLeaderboard>) -> Result<()> {
+    // Create action instruction
+    let instruction_data =
+        anchor_lang::InstructionData::data(&crate::instruction::UpdateLeaderboard {});
+    let action_args = ActionArgs::new(instruction_data);
+    let action_accounts = vec![
+        ShortAccountMeta {
+            pubkey: ctx.accounts.leaderboard.key(),
+            is_writable: true,
+        },
+        ShortAccountMeta {
+            pubkey: ctx.accounts.counter.key(),
+            is_writable: false,
+        },
+    ];
+    let action = CallHandler {
+        destination_program: crate::ID,
+        accounts: action_accounts,
+        args: action_args,
+        escrow_authority: ctx.accounts.payer.to_account_info(), // Signer authorized to pay transaction fees for action from escrow PDA
+        compute_units: 200_000,
+    };
+
+    // Build commit and action instruction
+    let magic_action = MagicInstructionBuilder {
+        payer: ctx.accounts.payer.to_account_info(),
+        magic_context: ctx.accounts.magic_context.to_account_info(),
+        magic_program: ctx.accounts.magic_program.to_account_info(),
+        magic_action: MagicAction::Commit(CommitType::WithHandler {
+            commited_accounts: vec![ctx.accounts.counter.to_account_info()],
+            call_handlers: vec![action],
+        }),
+    };
+
+    // Invoke
+    magic_action.build_and_invoke()?;
+
+    Ok()
+}
+```
+
+### Set Up Escrow Account
+
+Magic Actions require an escrow account to pay for base layer transaction fees:
+
+```typescript tests/magic-actions.ts
+import {
+  createTopUpEscrowInstruction,
+  createCloseEscrowInstruction,
+  escrowPdaFromEscrowAuthority,
+} from "@magicblock-labs/ephemeral-rollups-sdk";
+
+// Create and fund the escrow
+const topUpEscrowIx = createTopUpEscrowInstruction(
+  escrowPdaFromEscrowAuthority(anchor.Wallet.local().publicKey),
+  anchor.Wallet.local().publicKey,
+  anchor.Wallet.local().publicKey,
+  10000 // top-up amount in lamports
+);
+
+// Combine with delegation
+const delegateIx = await program.methods
+  .delegate()
+  .accounts({
+    payer: anchor.Wallet.local().publicKey,
+    pda: pda
+  })
+  .remainingAccounts(remainingAccounts)
+  .instruction();
+
+const tx = new Transaction().add(topUpEscrowIx, delegateIx);
+const signature = await sendAndConfirmTransaction(
+  routerConnection,
+  tx,
+  [anchor.Wallet.local().payer],
+  { skipPreflight: true }
+);
+```
+
+### Trigger the Action
+
+Call the commit instruction with the attached action handler:
+
+```typescript tests/magic-actions.ts
+const tx = await program.methods
+  .commitAndUpdateLeaderboard()
+  .accounts({
+    payer: anchor.Wallet.local().publicKey,
+    programId: program.programId,
+  })
+  .transaction();
+
+const signature = await sendAndConfirmTransaction(
+  routerConnection,
+  tx,
+  [anchor.Wallet.local().payer],
+  { skipPreflight: true }
+);
+
+// The leaderboard will be updated on the base layer automatically
+```
+
+</Steps>
+
+## Required Imports
+
+```rust
+use ephemeral_rollups_sdk::anchor::{action, commit, delegate, ephemeral};
+use ephemeral_rollups_sdk::ephem::{CallHandler, CommitType, MagicAction, MagicInstructionBuilder};
+use ephemeral_rollups_sdk::{ActionArgs, ShortAccountMeta};
+```
+
+## Account Context Annotations
+
+<CodeGroup>
+
+```rust Action Handler Context
+#[action]
+#[derive(Accounts)]
+pub struct UpdateLeaderboard<'info> {
+    #[account(mut, seeds = [LEADERBOARD_SEED], bump)]
+    pub leaderboard: Account<'info, Leaderboard>,
+    /// CHECK: Account may be delegated or undelegated
+    pub counter: UncheckedAccount<'info>,
+}
+```
+
+```rust Commit Context
+#[commit]
+#[derive(Accounts)]
+pub struct CommitAndUpdateLeaderboard<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(mut, seeds = [COUNTER_SEED], bump)]
+    pub counter: Account<'info, Counter>,
+
+    /// CHECK: Leaderboard PDA - not mut here, writable set in handler
+    #[account(seeds = [LEADERBOARD_SEED], bump)]
+    pub leaderboard: UncheckedAccount<'info>,
+
+    /// CHECK: Your program ID
+    pub program_id: AccountInfo<'info>,
+}
+```
+
+</CodeGroup>
+
+## Managing Escrow Accounts
+
+<Tabs>
+  <Tab title="Create & Fund">
+    ```typescript
+    import { createTopUpEscrowInstruction, escrowPdaFromEscrowAuthority } from "@magicblock-labs/ephemeral-rollups-sdk";
+
+    const escrowPda = escrowPdaFromEscrowAuthority(wallet.publicKey);
+    const topUpIx = createTopUpEscrowInstruction(
+      escrowPda,
+      wallet.publicKey,
+      wallet.publicKey,
+      10000 // lamports to fund the escrow
+    );
+    ```
+  </Tab>
+  <Tab title="Close Escrow">
+    ```typescript
+    import { createCloseEscrowInstruction } from "@magicblock-labs/ephemeral-rollups-sdk";
+
+    const closeEscrowIx = createCloseEscrowInstruction(
+      escrowPdaFromEscrowAuthority(wallet.publicKey),
+      wallet.publicKey
+    );
+
+    const tx = new Transaction().add(closeEscrowIx);
+    const signature = await sendAndConfirmTransaction(
+      connection,
+      tx,
+      [wallet.payer],
+      { skipPreflight: true }
+    );
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+Ensure your escrow account has sufficient funds to cover the transaction fees for all Magic Actions you plan to execute. Each action consumes base layer transaction fees from the escrow.
+</Warning>
+
+## What Makes This Advanced?
+
+Magic Actions represent an advanced pattern because they:
+
+1. **Bridge ER and Base Layer**: Automatically execute base chain logic when ER state is committed
+2. **Gasless Automation**: Use escrow accounts to pay for base layer fees without user interaction
+3. **Cross-Program Coordination**: Update global state (like leaderboards) based on individual player actions in ERs
+4. **Composability**: Chain multiple actions together in a single commit operation
+
+## Use Cases
+
+- **Global Leaderboards**: Update rankings when player scores are committed from game ERs
+- **Tournament Systems**: Trigger prize distributions when tournament state is finalized
+- **Cross-Chain State**: Synchronize ER state with base layer contracts
+- **Token Operations**: Execute SPL token transfers on the base layer when ER conditions are met
+
+## Example: Counter with Leaderboard
+
+```rust programs/magic-actions/src/lib.rs
+pub const COUNTER_SEED: &[u8] = b"counter";
+pub const LEADERBOARD_SEED: &[u8] = b"leaderboard";
+
+#[account]
+pub struct Counter {
+    pub count: u64,
+}
+
+#[account]
+pub struct Leaderboard {
+    pub high_score: u64,
+}
+```
+
+The counter is delegated and runs in an ER with ultra-low latency. The leaderboard stays on the base layer for global visibility. When the counter is committed, the Magic Action automatically checks if the score beats the high score and updates the leaderboard.
+
+## Next Steps
+
+- Learn about [Cranks](/examples/crank-counter) for scheduled automated execution
+- Explore [Session Keys](/examples/session-keys) for gasless user transactions
+- Check the [full source code](https://github.com/magicblock-labs/ephemeral-rollups-examples/tree/main/magic-actions)

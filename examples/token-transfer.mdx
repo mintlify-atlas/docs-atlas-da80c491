@@ -1,0 +1,428 @@
+---
+title: "Token Transfer"
+description: "SPL token operations and delegation in Ephemeral Rollups"
+---
+
+# Token Transfer
+
+The Token Transfer example demonstrates how to work with custom token accounts in Ephemeral Rollups. While this example uses a simple balance account for clarity, the same patterns apply to SPL tokens, allowing you to build high-frequency token operations with ultra-low latency.
+
+## Overview
+
+This example shows:
+
+- Creating and delegating balance accounts
+- Transferring tokens between accounts in ERs
+- Configurable delegation parameters
+- Committing and undelegating accounts
+
+<Info>
+While this example uses a simple `Balance` account, the same delegation patterns work with SPL Token Accounts for real token transfers.
+</Info>
+
+## How It Works
+
+<Steps>
+
+### Initialize Balance Accounts
+
+Each user has a balance account (PDA) seeded by their public key:
+
+```rust programs/dummy-transfer/src/lib.rs
+pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+    let acc = &mut ctx.accounts.balance;
+    acc.balance = 100;
+    Ok()
+}
+
+#[derive(Accounts)]
+pub struct Initialize<'info> {
+    #[account(init, payer = user, space = 8 + 8, seeds = [user.key.as_ref()], bump)]
+    pub balance: Account<'info, Balance>,
+    #[account(mut)]
+    pub user: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[account]
+pub struct Balance {
+    pub balance: u64,
+}
+```
+
+### Delegate with Custom Parameters
+
+The delegation includes configurable parameters for commit frequency and validator selection:
+
+```rust programs/dummy-transfer/src/lib.rs
+pub fn delegate(ctx: Context<DelegateBalance>, params: DelegateParams) -> Result<()> {
+    let config = DelegateConfig {
+        commit_frequency_ms: params.commit_frequency_ms,
+        validator: params.validator,
+    };
+
+    ctx.accounts.delegate_balance(
+        &ctx.accounts.payer,
+        &[ctx.accounts.payer.key.as_ref()],
+        config,
+    )?;
+    Ok()
+}
+
+#[delegate]
+#[derive(Accounts)]
+pub struct DelegateBalance<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(mut, del, seeds = [payer.key.as_ref()], bump)]
+    pub balance: AccountInfo<'info>,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct DelegateParams {
+    pub commit_frequency_ms: u32,
+    pub validator: Option<Pubkey>,
+}
+```
+
+### Transfer Between Accounts
+
+Once delegated, transfers execute with ultra-low latency in the ER:
+
+```rust programs/dummy-transfer/src/lib.rs
+pub fn transfer(ctx: Context<Transfer>, amount: u64) -> Result<()> {
+    let balance = &mut ctx.accounts.balance;
+    let receiver_balance = &mut ctx.accounts.receiver_balance;
+    if balance.balance < amount {
+        return Err(error!(ErrorCode::InsufficientBalance));
+    }
+    balance.balance -= amount;
+    receiver_balance.balance += amount;
+    Ok()
+}
+
+#[derive(Accounts)]
+pub struct Transfer<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(mut, seeds = [payer.key.as_ref()], bump)]
+    pub balance: Account<'info, Balance>,
+    /// CHECK: anyone can receive the tokens
+    pub receiver: AccountInfo<'info>,
+    #[account(init_if_needed, payer = payer, space = 8 + 8, seeds = [receiver.key.as_ref()], bump)]
+    pub receiver_balance: Account<'info, Balance>,
+    pub system_program: Program<'info, System>,
+}
+
+#[error_code]
+pub enum ErrorCode {
+    #[msg("Insufficient balance for transfer")]
+    InsufficientBalance,
+}
+```
+
+### Undelegate and Commit
+
+When you're done with high-frequency operations, undelegate to commit final state:
+
+```rust programs/dummy-transfer/src/lib.rs
+pub fn undelegate(ctx: Context<UndelegateBalance>) -> Result<()> {
+    commit_and_undelegate_accounts(
+        &ctx.accounts.payer,
+        vec![&ctx.accounts.balance.to_account_info()],
+        &ctx.accounts.magic_context,
+        &ctx.accounts.magic_program,
+    )?;
+    Ok()
+}
+
+#[commit]
+#[derive(Accounts)]
+pub struct UndelegateBalance<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(mut, seeds = [payer.key.as_ref()], bump)]
+    pub balance: Account<'info, Balance>,
+}
+```
+
+</Steps>
+
+## Program Annotations
+
+The program uses the `#[ephemeral]` macro to enable ER support:
+
+```rust programs/dummy-transfer/src/lib.rs
+use ephemeral_rollups_sdk::anchor::{commit, delegate, ephemeral};
+use ephemeral_rollups_sdk::cpi::DelegateConfig;
+use ephemeral_rollups_sdk::ephem::commit_and_undelegate_accounts;
+
+#[ephemeral]
+#[program]
+pub mod dummy_transfer {
+    use super::*;
+    // ... program code
+}
+```
+
+## Delegation Configuration
+
+<CodeGroup>
+
+```rust Commit Frequency
+DelegateConfig {
+    commit_frequency_ms: 30000, // Commit every 30 seconds
+    validator: None,
+}
+```
+
+```rust Specific Validator
+DelegateConfig {
+    commit_frequency_ms: 30000,
+    validator: Some(validator_pubkey), // Target specific ER validator
+}
+```
+
+```rust Default Config
+DelegateConfig::default() // Uses default commit frequency and closest validator
+```
+
+</CodeGroup>
+
+<Warning>
+Set `commit_frequency_ms` based on your use case:
+- **Gaming**: 10-30 seconds for responsive state updates
+- **Trading**: 5-10 seconds for more frequent commits
+- **High-value operations**: Lower values for more frequent base layer syncs
+</Warning>
+
+## Complete Flow Example
+
+```typescript
+import { Program } from "@coral-xyz/anchor";
+import { PublicKey } from "@solana/web3.js";
+
+// 1. Initialize balance account on base layer
+const initTx = await program.methods
+  .initialize()
+  .accounts({
+    user: wallet.publicKey,
+  })
+  .rpc();
+
+// 2. Delegate to ER with custom config
+const delegateTx = await program.methods
+  .delegate({
+    commitFrequencyMs: 30000,
+    validator: null,
+  })
+  .accounts({
+    payer: wallet.publicKey,
+  })
+  .rpc();
+
+// 3. Perform rapid transfers in ER
+for (let i = 0; i < 100; i++) {
+  await program.methods
+    .transfer(new BN(1))
+    .accounts({
+      payer: wallet.publicKey,
+      receiver: recipientPublicKey,
+    })
+    .rpc(); // Ultra-low latency in ER!
+}
+
+// 4. Undelegate and commit final state
+const undelegateTx = await program.methods
+  .undelegate()
+  .accounts({
+    payer: wallet.publicKey,
+  })
+  .rpc();
+```
+
+## SPL Token Integration
+
+To use this pattern with real SPL tokens:
+
+<Steps>
+
+### Add SPL Token Dependencies
+
+```toml Cargo.toml
+[dependencies]
+anchor-spl = "0.32.1"
+spl-token = "6.0.0"
+```
+
+### Update Account Structure
+
+Replace the `Balance` account with SPL Token Account:
+
+```rust
+use anchor_spl::token::{Token, TokenAccount};
+
+#[derive(Accounts)]
+pub struct Transfer<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    #[account(
+        mut,
+        associated_token::mint = mint,
+        associated_token::authority = authority
+    )]
+    pub from: Account<'info, TokenAccount>,
+    #[account(
+        mut,
+        associated_token::mint = mint,
+        associated_token::authority = to_authority
+    )]
+    pub to: Account<'info, TokenAccount>,
+    pub mint: Account<'info, Mint>,
+    pub token_program: Program<'info, Token>,
+}
+```
+
+### Delegate Token Accounts
+
+```rust
+pub fn delegate_token_account(ctx: Context<DelegateTokenAccount>) -> Result<()> {
+    ctx.accounts.delegate_pda(
+        &ctx.accounts.payer,
+        &[], // Token accounts don't use seeds
+        DelegateConfig::default(),
+    )?;
+    Ok()
+}
+```
+
+</Steps>
+
+## What Makes This Advanced?
+
+This example demonstrates:
+
+1. **Custom Delegation Parameters**: Fine-grained control over commit frequency and validator selection
+2. **Multi-Account Operations**: Transferring between multiple delegated accounts
+3. **Init-If-Needed Pattern**: Automatically creating receiver accounts during transfers
+4. **Error Handling**: Proper balance validation with custom errors
+5. **PDA Management**: Using PDAs for user-specific balance accounts
+
+## Use Cases
+
+<Tabs>
+  <Tab title="Gaming">
+    - In-game currency transfers
+    - Rapid item trading between players
+    - Reward distributions
+    - Marketplace transactions
+  </Tab>
+  <Tab title="DeFi">
+    - High-frequency trading
+    - Liquidity pool interactions
+    - Automated market makers
+    - Flash loan operations
+  </Tab>
+  <Tab title="Social">
+    - Tipping and microtransactions
+    - Content creator payments
+    - Social token transfers
+    - Community rewards
+  </Tab>
+</Tabs>
+
+## Performance Benefits
+
+Compared to base layer token transfers:
+
+- **Latency**: ~400ms → ~10ms (40x faster)
+- **Cost**: ~0.000005 SOL → negligible in ER
+- **Throughput**: Thousands of transfers per second
+- **Batching**: Execute 100s of transfers before committing
+
+## Testing Locally
+
+<Steps>
+
+### Install the Local Validator
+
+```bash
+npm install -g @magicblock-labs/ephemeral-validator
+```
+
+### Start the Local Validator
+
+```bash
+ACCOUNTS_REMOTE=https://rpc.magicblock.app/devnet ACCOUNTS_LIFECYCLE=ephemeral ephemeral-validator
+```
+
+### Run Tests
+
+```bash
+PROVIDER_ENDPOINT=http://localhost:8899 WS_ENDPOINT=ws://localhost:8900 anchor test --skip-build --skip-deploy --skip-local-validator
+```
+
+</Steps>
+
+## Testing on Devnet
+
+To run tests on devnet:
+
+```bash
+anchor test --skip-local-validator --skip-build --skip-deploy
+```
+
+<Note>
+Make sure you have devnet SOL in your wallet before running devnet tests.
+</Note>
+
+## Security Considerations
+
+<Warning>
+**Important:**
+
+- Always validate account ownership before transfers
+- Check sufficient balance before debiting
+- Use proper PDA derivation for user accounts
+- Set appropriate commit frequencies for your use case
+- Monitor delegated account states
+</Warning>
+
+## Adapting for Real Tokens
+
+The key differences when using SPL tokens:
+
+1. **Account Type**: `TokenAccount` instead of custom `Balance`
+2. **Authority**: Token account authority, not PDA seeds
+3. **Transfer Logic**: Use SPL token CPI instead of direct balance updates
+4. **Mint Validation**: Ensure all accounts use the same mint
+
+Example SPL transfer in ER:
+
+```rust
+use anchor_spl::token;
+
+pub fn transfer_tokens(ctx: Context<TransferTokens>, amount: u64) -> Result<()> {
+    token::transfer(
+        CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            token::Transfer {
+                from: ctx.accounts.from.to_account_info(),
+                to: ctx.accounts.to.to_account_info(),
+                authority: ctx.accounts.authority.to_account_info(),
+            },
+        ),
+        amount,
+    )?;
+    Ok()
+}
+```
+
+This transfer executes in the ER with the same ultra-low latency as the balance example!
+
+## Next Steps
+
+- Explore [Session Keys](/examples/session-keys) for gasless token transfers
+- Learn about [Magic Actions](/examples/magic-actions) to trigger base layer logic on commit
+- Check out [SPL Token documentation](https://spl.solana.com/token) for working with real tokens
+- Review the [full source code](https://github.com/magicblock-labs/ephemeral-rollups-examples/tree/main/dummy-token-transfer)

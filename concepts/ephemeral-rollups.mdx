@@ -1,0 +1,147 @@
+---
+title: Ephemeral Rollups
+description: Learn about Ephemeral Rollups and how they enable low-latency, composable applications on Solana
+---
+
+Ephemeral Rollups (ERs) are a scaling solution for Solana that enable low-latency, composable applications and games. They work by temporarily delegating account ownership to a specialized validator that can process transactions with minimal latency while maintaining composability with the base layer.
+
+## What are Ephemeral Rollups?
+
+Ephemeral Rollups provide a temporary execution environment where delegated accounts can be modified with extremely low latency (typically under 100ms). Unlike traditional rollups, Ephemeral Rollups are:
+
+- **Low-latency**: Transactions execute in milliseconds rather than seconds
+- **Composable**: Accounts remain accessible and can interact with base layer programs
+- **Temporary**: Accounts are delegated for a specific period and then returned to the base layer
+- **Automatic**: State commits to the base layer at configurable intervals
+
+<Info>
+Read more about Ephemeral Rollups in the [official documentation](https://docs.magicblock.gg/EphemeralRollups/ephemeral_rollups).
+</Info>
+
+## How Ephemeral Rollups work
+
+The Ephemeral Rollups flow consists of three main phases:
+
+<Steps>
+
+### Delegation
+
+Accounts are delegated from the base layer (Solana) to the Ephemeral Rollup validator. During delegation, you specify:
+
+- The account(s) to delegate (typically PDAs)
+- The commit frequency (how often state syncs to base layer)
+- Optionally, a specific validator to handle the delegation
+
+```rust
+// Example from anchor-counter
+pub fn delegate(ctx: Context<DelegateInput>) -> Result<()> {
+    ctx.accounts.delegate_pda(
+        &ctx.accounts.payer,
+        &[COUNTER_SEED],
+        DelegateConfig {
+            validator: ctx.remaining_accounts.first().map(|acc| acc.key()),
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+```
+
+### Execution
+
+Once delegated, transactions can execute on the Ephemeral Rollup with minimal latency. Any program instruction that works on Solana will work in the ER:
+
+```typescript
+// Connect to the Ephemeral Rollup endpoint
+const providerER = new anchor.AnchorProvider(
+  new anchor.web3.Connection("https://devnet-as.magicblock.app/", {
+    wsEndpoint: "wss://devnet-as.magicblock.app/",
+  }),
+  wallet
+);
+
+// Execute transactions on ER (typically 50-100ms)
+let tx = await program.methods.increment()
+  .accounts({ counter: counterPDA })
+  .transaction();
+  
+tx.feePayer = providerER.wallet.publicKey;
+tx.recentBlockhash = (await providerER.connection.getLatestBlockhash()).blockhash;
+const txHash = await providerER.sendAndConfirm(tx);
+```
+
+### Commit
+
+State changes are committed back to the base layer either:
+
+- **Automatically**: At the interval specified in `commit_frequency_ms`
+- **Manually**: By calling commit instructions from your program
+- **On undelegation**: When the account is returned to the base layer
+
+```rust
+// Manual commit example from anchor-counter
+pub fn commit(ctx: Context<IncrementAndCommit>) -> Result<()> {
+    commit_accounts(
+        &ctx.accounts.payer,
+        vec![&ctx.accounts.counter.to_account_info()],
+        &ctx.accounts.magic_context,
+        &ctx.accounts.magic_program,
+    )?;
+    Ok(())
+}
+```
+
+</Steps>
+
+## Architecture diagram
+
+The flow of an Ephemeral Rollup session:
+
+```
+Base Layer (Solana)          Ephemeral Rollup
+─────────────────           ──────────────────
+
+1. Account PDA
+   │
+   │ Delegate → 
+   │                          2. Account PDA (delegated)
+   │                             │
+   │                             │ Fast transactions
+   │                             │ (50-100ms)
+   │                             │
+   │ ← Commit (automatic)        │
+   │   every commit_frequency_ms │
+   │                             │
+3. Account PDA ← Undelegate   ←─┘
+   (final state)
+```
+
+## Key benefits
+
+- **Sub-100ms latency**: Transactions execute in milliseconds instead of seconds
+- **Same developer experience**: Use existing Solana programs and tools
+- **Composability**: Interact with base layer accounts and programs
+- **Cost efficient**: Reduce transaction costs for high-frequency operations
+- **Automatic state sync**: Configure commit intervals to balance latency and finality
+
+## Examples that use Ephemeral Rollups
+
+All examples in this repository demonstrate Ephemeral Rollups:
+
+- [Anchor Counter](/examples/anchor-counter) - Simple counter with Anchor framework
+- [Rust Counter](/examples/rust-counter) - Native Rust implementation
+- [Bolt Counter](/examples/bolt-counter) - Using the Bolt ECS framework
+- [Crank Counter](/examples/crank-counter) - Scheduled automatic execution
+- [Session Keys](/examples/session-keys) - Temporary signing keys with ERs
+- [Token Transfer](/examples/token-transfer) - Token operations on ERs
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Account delegation" icon="arrow-right-arrow-left" href="/concepts/delegation">
+    Learn how to delegate accounts to Ephemeral Rollups
+  </Card>
+  <Card title="Transaction execution" icon="bolt" href="/concepts/transactions">
+    Understand how to execute transactions in ERs
+  </Card>
+</CardGroup>
