@@ -1,0 +1,101 @@
+{
+  "projectType": "general",
+  "projectName": "MagicBlock Engine Examples",
+  "projectDescription": "Integration examples for building with Ephemeral Rollups on Solana",
+  "theme": "aspen",
+  "primaryColor": "#9333EA",
+  "lightColor": "#A855F7",
+  "darkColor": "#7E22CE",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/ephemeral-rollups",
+              "concepts/delegation",
+              "concepts/transactions"
+            ]
+          },
+          {
+            "group": "Framework Examples",
+            "pages": [
+              "examples/anchor-counter",
+              "examples/rust-counter",
+              "examples/bolt-counter",
+              "examples/pinocchio-counter"
+            ]
+          },
+          {
+            "group": "Advanced Examples",
+            "pages": [
+              "examples/crank-counter",
+              "examples/magic-actions",
+              "examples/session-keys",
+              "examples/roll-dice",
+              "examples/token-transfer"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/local-setup",
+              "development/testing",
+              "development/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "SDK Reference",
+            "pages": [
+              "api/typescript-sdk",
+              "api/rust-sdk"
+            ]
+          },
+          {
+            "group": "Program Instructions",
+            "pages": [
+              "api/delegation-instructions",
+              "api/commit-instructions"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Account delegation to Ephemeral Rollups",
+    "Low-latency transaction execution",
+    "Multiple framework integrations (Anchor, Bolt, Pinocchio)",
+    "Automatic commit and sync mechanisms",
+    "Session keys for gasless transactions",
+    "Magic Actions for on-chain triggers",
+    "Scheduled cranks for automation",
+    "VRF integration for randomness"
+  ],
+  "publicApiSurface": [
+    "delegate_account",
+    "undelegate_account",
+    "commit_accounts",
+    "commit_and_undelegate_accounts",
+    "createDelegateInstruction",
+    "createUndelegateInstruction",
+    "ApplySystem",
+    "FindComponentPda",
+    "DelegateConfig",
+    "DelegateAccounts"
+  ]
+}
